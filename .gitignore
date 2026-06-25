@@ -23,6 +23,10 @@ test_outputs/
 /ffmpeg.exe
 /ffprobe.exe
 packaging/slim_resource/bin/
+packaging/slim_resource/assets/
+packaging/slim_resource/fonts/
+packaging/slim_resource/subtitle_style/
+packaging/slim_resource/translations/
 packaging/third_party/
 
 # 打包产物
@@ -48,3 +52,9 @@ secrets.*
 /*.mp4
 *.bak
 .cache/
+
+# 大型本地工具（Faster-Whisper 4GB+，勿提交）
+resource/bin/Faster-Whisper-XXL/
+
+# Windows 杂项
+nul

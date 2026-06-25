@@ -39,18 +39,17 @@
 
 **不要提交**：`.venv/`、`AppData/`、`dist/`、`build/`、`resource/bin/Faster-Whisper-XXL/`、`packaging/output/*.exe`。
 
-## 一键推送（推荐）
+## 推送源码（**不需要 gh**）
+
+详见 **[docs/PUSH_WITHOUT_GH.md](PUSH_WITHOUT_GH.md)**（网页建仓库 + `push_github.ps1` + PAT）。
 
 ```powershell
-# 1. 安装 GitHub CLI 并登录（仅首次）
-winget install GitHub.cli
-gh auth login
-
-# 2. 推送源码（会自动 gh repo create 若仓库不存在）
+# 1. 浏览器打开 https://github.com/new 创建空仓库 subtitle-assistant
+# 2. 项目根目录执行：
 .\packaging\scripts\push_github.ps1
 ```
 
-无 `gh` 时：在 GitHub 网页新建空仓库 `subtitle-assistant`，再执行脚本或手动 `git push`。
+可选：安装 `winget install GitHub.cli` 后可用 `gh auth login`，非必须。
 
 ## 本地首次推送到 GitHub（手动）
 

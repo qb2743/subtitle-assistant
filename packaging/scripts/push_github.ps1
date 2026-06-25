@@ -1,47 +1,69 @@
 #Requires -Version 5.1
-<#
-  初始化 git 并推送到 https://github.com/qb2743/subtitle-assistant
-  前置:
-    1. 在 GitHub 网页新建空仓库 subtitle-assistant（不要勾选 README）
-    2. 安装 GitHub CLI: winget install GitHub.cli
-    3. gh auth login
-  或不用 gh: 手动在网页建仓库后执行本脚本（仅 git push）
-#>
+# Push to https://github.com/qb2743/subtitle-assistant (no gh required)
+# First create empty repo at https://github.com/new name: subtitle-assistant
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $Root
 
-$Repo = "qb2743/subtitle-assistant"
-$Remote = "https://github.com/$Repo.git"
+$Remote = "https://github.com/qb2743/subtitle-assistant.git"
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "Install Git: https://git-scm.com/download/win"
+    exit 1
+}
+
+$gitEmail = git config user.email 2>&1
+if ([string]::IsNullOrWhiteSpace($gitEmail)) {
+    git config user.name "qb2743"
+    git config user.email "qb2743@users.noreply.github.com"
+    Write-Host "Set git user to qb2743 for this repo."
+}
 
 if (-not (Test-Path (Join-Path $Root ".git"))) {
     git init
     git branch -M main
 }
 
-# 确保 logo.ico 存在（提交到仓库，方便 Inno 编译）
-$ico = Join-Path $Root "resource/assets/logo.ico"
-if (-not (Test-Path $ico)) {
-    $py = Join-Path $Root ".venv/Scripts/python.exe"
-    if (Test-Path $py) { & $py (Join-Path $Root "packaging/scripts/make_logo_ico.py") }
+git rev-parse HEAD 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    git add -A
+    git commit -m "subtitle-assistant 1.0.0 initial release"
 }
 
-git add -A
-git status
-$confirm = Read-Host "Continue commit? (y/n)"
-if ($confirm -ne "y") { exit 0 }
+$originUrl = ""
+try {
+    $originUrl = git remote get-url origin 2>&1 | Out-String
+    $originUrl = $originUrl.Trim()
+} catch {
+    $originUrl = ""
+}
 
-git commit -m "字幕助手 1.0.0 初始发布"
-
-if (-not (git remote get-url origin 2>$null)) {
-    if (Get-Command gh -ErrorAction SilentlyContinue) {
-        gh repo create subtitle-assistant --public --source=. --remote=origin --push
-        Write-Host "Created and pushed via gh."
-        exit 0
-    }
+if ([string]::IsNullOrWhiteSpace($originUrl)) {
     git remote add origin $Remote
+    Write-Host "Added remote: $Remote"
 }
+elseif ($originUrl -ne $Remote) {
+    git remote set-url origin $Remote
+}
+
+Write-Host ""
+Write-Host "Pushing to GitHub..."
+Write-Host ""
 
 git push -u origin main
-Write-Host "Pushed to $Remote"
-Write-Host "Release: upload packaging\installer\output\SubtitleAssistant-1.0.0-setup.exe to GitHub Releases tag v1.0.0"
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host ""
+    Write-Host "OK: https://github.com/qb2743/subtitle-assistant"
+    Write-Host "Upload setup exe to Releases tag v1.0.0"
+}
+else {
+    Write-Host ""
+    Write-Host "Push failed. Check:"
+    Write-Host "  1) Empty repo subtitle-assistant exists on GitHub"
+    Write-Host "  2) Use PAT as password: GitHub Settings -> Developer settings -> PAT (classic), scope repo"
+    Write-Host "     Username qb2743, Password = token"
+    Write-Host "  3) Or SSH: git remote set-url origin git@github.com:qb2743/subtitle-assistant.git"
+    exit 1
+}

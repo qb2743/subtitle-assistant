@@ -67,6 +67,9 @@ else:
     FONTS_PATH = APPDATA_PATH / "resource" / "fonts"
 
 BUNDLED_BIN_PATH = RESOURCE_PATH / "bin"
+LOCAL_FFMPEG_PATH = BIN_PATH / "ffmpeg"
+ROOT_BIN_PATH = ROOT_PATH
+BUNDLED_FFMPEG_PATH = BUNDLED_BIN_PATH / "ffmpeg"
 
 LOG_PATH = APPDATA_PATH / "logs"
 LLM_LOG_FILE = LOG_PATH / "llm_requests.jsonl"
@@ -102,11 +105,20 @@ if not _IS_DEV:
     _copy_missing_tree(RESOURCE_PATH / "subtitle_style", SUBTITLE_STYLE_PATH)
     _copy_missing_tree(RESOURCE_PATH / "fonts", FONTS_PATH)
 
-# Add bin paths to PATH. User-downloaded binaries take precedence over bundled
-# tools, while packaged ffmpeg/ffprobe still work out of the box.
-for _path in [FASTER_WHISPER_PATH, BIN_PATH, BUNDLED_BIN_PATH]:
-    if _path.exists():
-        os.environ["PATH"] = str(_path) + os.pathsep + os.environ["PATH"]
+# Add app-managed bin paths before system PATH. User-downloaded binaries take
+# precedence over bundled tools, while packaged ffmpeg/ffprobe remains a fallback.
+_bin_paths = [
+    LOCAL_FFMPEG_PATH,
+    FASTER_WHISPER_PATH,
+    BIN_PATH,
+    BUNDLED_FFMPEG_PATH,
+    BUNDLED_BIN_PATH,
+    ROOT_BIN_PATH,
+]
+_existing_path = os.environ.get("PATH", "")
+_extra_paths = [str(_path) for _path in _bin_paths if _path.exists()]
+if _extra_paths:
+    os.environ["PATH"] = os.pathsep.join(_extra_paths + [_existing_path])
 
 if (BIN_PATH / "vlc").exists():
     os.environ["PYTHON_VLC_MODULE_PATH"] = str(BIN_PATH / "vlc")

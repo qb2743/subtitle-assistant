@@ -1,22 +1,17 @@
 """Audio helpers for dubbing timeline assembly."""
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
 from pydub import AudioSegment
-from pydub.utils import which
 
 # Configure ffmpeg/ffprobe paths for pydub
-# First check if they're in project root, otherwise use system PATH
-_project_root = Path(__file__).parent.parent.parent.parent
-_ffmpeg_local = _project_root / "ffmpeg.exe"
-_ffprobe_local = _project_root / "ffprobe.exe"
-
-if _ffmpeg_local.exists():
-    AudioSegment.converter = str(_ffmpeg_local)
-if _ffprobe_local.exists():
-    AudioSegment.ffprobe = str(_ffprobe_local)
+for _attr, _name in (("converter", "ffmpeg"), ("ffprobe", "ffprobe")):
+    _path = shutil.which(_name)
+    if _path:
+        setattr(AudioSegment, _attr, _path)
 
 
 def get_audio_duration_ms(path: str) -> int:

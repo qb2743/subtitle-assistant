@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Slim = Join-Path $Root "packaging/slim_resource"
 $ThirdParty = Join-Path $Root "packaging/third_party/ffmpeg"
-$BundledFw = Join-Path $Root "resource/bin/Faster-Whisper-XXL/ffmpeg.exe"
+$BundledFw = Join-Path $Root "resource/bin/Faster-Whisper-XXL"
 
 foreach ($sub in @("assets", "subtitle_style", "translations", "fonts")) {
     $src = Join-Path $Root "resource/$sub"
@@ -24,26 +24,37 @@ $py = Join-Path $Root ".venv/Scripts/python.exe"
 if (-not (Test-Path $py)) { $py = "python" }
 & $py (Join-Path $Root "packaging/scripts/make_logo_ico.py")
 
-# ffmpeg — 优先 third_party，其次 Faster-Whisper 自带（不打包整个 FW）
+# FFmpeg tools: prefer third_party, then bundled Faster-Whisper, then project root.
 $ffDst = Join-Path $Slim "bin/ffmpeg"
 New-Item -ItemType Directory -Force -Path $ffDst | Out-Null
-$ffSrc = Join-Path $ThirdParty "ffmpeg.exe"
-if (-not (Test-Path $ffSrc)) { $ffSrc = $BundledFw }
-if (Test-Path $ffSrc) {
-    Copy-Item $ffSrc (Join-Path $ffDst "ffmpeg.exe") -Force
-    Write-Host "Bundled ffmpeg.exe from $ffSrc"
-} else {
+
+$tools = @("ffmpeg.exe", "ffprobe.exe")
+foreach ($tool in $tools) {
+    $src = Join-Path $ThirdParty $tool
+    if (-not (Test-Path $src)) { $src = Join-Path $BundledFw $tool }
+    if (-not (Test-Path $src)) { $src = Join-Path $Root $tool }
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $ffDst $tool) -Force
+        Write-Host "Bundled $tool from $src"
+    }
+}
+
+$missingTools = $tools | Where-Object { -not (Test-Path (Join-Path $ffDst $_)) }
+if ($missingTools.Count -gt 0) {
     Write-Host "Downloading ffmpeg essentials..."
     $zip = Join-Path $Root "packaging/third_party/ffmpeg-essentials.zip"
     $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-    Expand-Archive -Path $zip -DestinationPath (Join-Path $Root "packaging/third_party/_fftmp") -Force
-    $found = Get-ChildItem (Join-Path $Root "packaging/third_party/_fftmp") -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
-    if ($found) {
-        Copy-Item $found.FullName (Join-Path $ffDst "ffmpeg.exe") -Force
-        Write-Host "Bundled ffmpeg.exe from download"
+    $tmp = Join-Path $Root "packaging/third_party/_fftmp"
+    Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    foreach ($tool in $missingTools) {
+        $found = Get-ChildItem $tmp -Recurse -Filter $tool | Select-Object -First 1
+        if ($found) {
+            Copy-Item $found.FullName (Join-Path $ffDst $tool) -Force
+            Write-Host "Bundled $tool from download"
+        }
     }
-    Remove-Item (Join-Path $Root "packaging/third_party/_fftmp") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Done: $Slim"

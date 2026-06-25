@@ -35,7 +35,14 @@ def check_whisper_connection(
         # 创建 OpenAI 客户端
         base_url = normalize_base_url(base_url)
         api_key = api_key.strip()
-        client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=60)
+        from videocaptioner.core.llm.request_logger import create_http_client
+
+        client = openai.OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=60,
+            http_client=create_http_client(),
+        )
 
         # Reading音频文件
         with open(TEST_AUDIO_PATH, "rb") as audio_file:

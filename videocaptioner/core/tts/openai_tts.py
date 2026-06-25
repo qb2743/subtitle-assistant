@@ -2,6 +2,8 @@
 
 from openai import OpenAI
 
+from videocaptioner.core.llm.request_logger import create_http_client
+
 from videocaptioner.core.tts.base import BaseTTS
 from videocaptioner.core.tts.tts_data import TTSConfig, TTSDataSeg
 from videocaptioner.core.utils.logger import setup_logger
@@ -31,6 +33,7 @@ class OpenAITTS(BaseTTS):
             base_url=config.base_url,
             timeout=config.timeout,
             max_retries=config.max_retries,
+            http_client=create_http_client(),
         )
 
     def _synthesize(self, segment: TTSDataSeg, output_path: str) -> None:

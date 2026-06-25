@@ -45,6 +45,25 @@ def _write_log(entry: Dict[str, Any]) -> None:
         pass
 
 
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _disguise_request(request: httpx.Request) -> None:
+    """移除 OpenAI SDK 的机器人标识头，避免被 Cloudflare 拦截"""
+    keys_to_remove = [k for k in request.headers if k.startswith("x-stainless")]
+    for k in keys_to_remove:
+        del request.headers[k]
+    request.headers["user-agent"] = _BROWSER_UA
+
+
+def create_http_client() -> httpx.Client:
+    """创建不含 SDK 机器人标识的 HTTPX 客户端（用于非日志场景）"""
+    return httpx.Client(event_hooks={"request": [_disguise_request]})
+
+
 # ==================== HTTPX Hooks ====================
 
 
@@ -81,12 +100,12 @@ def _on_response(response: httpx.Response) -> None:
 
 
 def create_logging_http_client() -> httpx.Client:
-    """创建带日志记录的 HTTPX 客户端"""
+    """创建带日志记录 + 反 Cloudflare 拦截的 HTTPX 客户端"""
     return httpx.Client(
         event_hooks={
-            "request": [_on_request],
+            "request": [_disguise_request, _on_request],
             "response": [_on_response],
-        }
+        },
     )
 
 

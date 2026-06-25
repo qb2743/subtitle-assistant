@@ -2019,9 +2019,11 @@ class VoicePreviewThread(QThread):
             raise ValueError("OpenAI 需要 API Key")
 
         from openai import OpenAI
+        from videocaptioner.core.llm.request_logger import create_http_client
         client = OpenAI(
             api_key=self.api_key,
-            base_url=self.api_base if self.api_base else None
+            base_url=self.api_base if self.api_base else None,
+            http_client=create_http_client(),
         )
 
         response = client.audio.speech.create(

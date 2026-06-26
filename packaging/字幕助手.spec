@@ -4,7 +4,7 @@
 
 from pathlib import Path
 
-ROOT = Path(SPEC).resolve().parent.parent
+ROOT = Path(SPEC).parent.parent
 SLIM = ROOT / "packaging" / "slim_resource"
 
 block_cipher = None

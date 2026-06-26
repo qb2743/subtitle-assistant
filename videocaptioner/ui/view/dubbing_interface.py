@@ -39,6 +39,7 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.config import BIN_PATH, CACHE_PATH
+from videocaptioner.core.dubbing.subtitle_parser import load_dubbing_segments
 
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
@@ -217,6 +218,7 @@ class DubbingInterface(QWidget):
         self.worker_thread = None
         self.quota_poll_timer = None  # 配额轮询定时器
         self.last_quota_percentage = 0  # 上次查询的配额百分比
+        self.last_quota_info = None
         self.is_playing = False  # 音频播放状态
         self._config_loading = False
         self.setup_ui()
@@ -505,6 +507,32 @@ class DubbingInterface(QWidget):
         speed_layout.addStretch()
         params_layout.addLayout(speed_layout)
 
+        workers_layout = QHBoxLayout()
+        workers_layout.addWidget(BodyLabel("并行数:", self))
+        self.workers_slider = Slider(Qt.Horizontal, self)
+        self.workers_slider.setRange(1, 16)
+        self.workers_slider.setValue(5)
+        self.workers_slider.setFixedWidth(180)
+        self.workers_slider.setToolTip(
+            "同时合成的字幕条数上限。ElevenLabs 还会受 API Key 数量与模型并发限制。"
+        )
+        self.workers_slider.valueChanged.connect(self._on_workers_slider_changed)
+        workers_layout.addWidget(self.workers_slider)
+        self.workers_spin = SpinBox(self)
+        self.workers_spin.setRange(1, 16)
+        self.workers_spin.setValue(5)
+        self.workers_spin.setSuffix(" 路")
+        self.workers_spin.setFixedWidth(88)
+        self.workers_spin.setToolTip(self.workers_slider.toolTip())
+        self.workers_spin.valueChanged.connect(self._on_workers_spin_changed)
+        workers_layout.addWidget(self.workers_spin)
+        self.workers_reset_btn = ToolButton(FIF.SYNC, self)
+        self.workers_reset_btn.setToolTip("重置为默认并行数 (5)")
+        self.workers_reset_btn.clicked.connect(self._on_workers_reset)
+        workers_layout.addWidget(self.workers_reset_btn)
+        workers_layout.addStretch()
+        params_layout.addLayout(workers_layout)
+
         right_layout.addWidget(params_card)
 
         # API Key
@@ -691,6 +719,7 @@ class DubbingInterface(QWidget):
         self.pause_switch.checkedChanged.connect(self._persist_dubbing_settings)
         self.pause_ms_spin.valueChanged.connect(self._persist_dubbing_settings)
         self.speed_spin.valueChanged.connect(self._persist_dubbing_settings)
+        self.workers_spin.valueChanged.connect(self._persist_dubbing_settings)
         self.model_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
         self.clone_audio_edit.textChanged.connect(self._persist_dubbing_settings)
         self.clone_text_edit.textChanged.connect(self._persist_dubbing_settings)
@@ -721,6 +750,7 @@ class DubbingInterface(QWidget):
         cfg.dubbing_fixed_line_pause.value = self.pause_switch.isChecked()
         cfg.dubbing_fixed_line_pause_ms.value = self.pause_ms_spin.value()
         cfg.dubbing_speed.value = self.speed_spin.value()
+        cfg.dubbing_tts_workers.value = self.workers_spin.value()
         cfg.dubbing_api_base.value = self.api_base_edit.text()
         cfg.dubbing_clone_audio_path.value = self.clone_audio_edit.text().strip()
         cfg.dubbing_clone_audio_text.value = self.clone_text_edit.toPlainText().strip()
@@ -851,6 +881,7 @@ class DubbingInterface(QWidget):
         char_limit = quota_info.get("character_limit", 10000)
         reset_date = quota_info.get("reset_date", "未知")
         reset_unix = quota_info.get("next_character_count_reset_unix", 0)
+        self.last_quota_info = quota_info
 
         # 计算剩余配额
         remaining = char_limit - char_count
@@ -877,6 +908,7 @@ class DubbingInterface(QWidget):
         self.quota_label.setText(f"配额: 查询失败")
         self.reset_date_label.setText(f"错误: {error_msg}")
         self.quota_label.setStyleSheet("color: #999; font-size: 12px;")
+        self.last_quota_info = None
 
     def _start_quota_polling(self, percentage: float, reset_unix: int):
         """启动配额轮询定时器"""
@@ -960,6 +992,7 @@ class DubbingInterface(QWidget):
         self.pause_switch.setChecked(cfg.dubbing_fixed_line_pause.value)
         self.pause_ms_spin.setValue(cfg.dubbing_fixed_line_pause_ms.value)
         self.speed_spin.setValue(cfg.dubbing_speed.value)
+        self.workers_spin.setValue(int(cfg.dubbing_tts_workers.value))
         self._sync_api_key_display()
         self.api_base_edit.setText(cfg.dubbing_api_base.value)
         self.clone_audio_edit.setText(cfg.dubbing_clone_audio_path.value or "")
@@ -1026,6 +1059,19 @@ class DubbingInterface(QWidget):
     def _on_speed_reset(self):
         """重置语速为默认值 1.0x"""
         self.speed_spin.setValue(1.0)
+
+    def _on_workers_slider_changed(self, value: int):
+        self.workers_spin.blockSignals(True)
+        self.workers_spin.setValue(value)
+        self.workers_spin.blockSignals(False)
+
+    def _on_workers_spin_changed(self, value: int):
+        self.workers_slider.blockSignals(True)
+        self.workers_slider.setValue(value)
+        self.workers_slider.blockSignals(False)
+
+    def _on_workers_reset(self):
+        self.workers_spin.setValue(5)
 
     def _on_provider_changed(self, text):
         """Provider 改变时的提示和界面更新"""
@@ -1755,6 +1801,9 @@ class DubbingInterface(QWidget):
             input_mode = "text"
             input_data = user_text
 
+        if provider == "elevenlabs" and not self._check_elevenlabs_quota_before_start(input_mode, input_data):
+            return
+
         # 禁用控件
         self.start_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
@@ -1776,6 +1825,37 @@ class DubbingInterface(QWidget):
 
         # 启动线程
         self.worker_thread.start()
+
+    def _check_elevenlabs_quota_before_start(self, input_mode: str, input_data: str) -> bool:
+        if len(parse_api_keys(cfg.dubbing_api_key.value)) != 1:
+            return True
+        quota = self.last_quota_info
+        if not quota:
+            return True
+        used = int(quota.get("character_count") or 0)
+        limit = int(quota.get("character_limit") or 0)
+        remaining = max(0, limit - used)
+        needed = self._estimate_elevenlabs_characters(input_mode, input_data)
+        if limit > 0 and needed > remaining:
+            reset_date = quota.get("reset_date") or "未知"
+            InfoBar.error(
+                title="ElevenLabs 配额不足",
+                content=f"本次约需 {needed:,} 字符，当前剩余 {remaining:,} 字符；重置日期: {reset_date}",
+                duration=INFOBAR_DURATION_ERROR,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return False
+        return True
+
+    def _estimate_elevenlabs_characters(self, input_mode: str, input_data: str) -> int:
+        if input_mode == "text":
+            return len(input_data.strip())
+        try:
+            segments = load_dubbing_segments(input_data)
+            return sum(len(segment.text_for_tts.strip()) for segment in segments)
+        except Exception:
+            return 0
 
     def _on_progress(self, percent: int, message: str):
         """进度更新"""
@@ -1885,9 +1965,10 @@ class ElevenLabsAPITestThread(QThread):
         try:
             # 使用官方 elevenlabs 库
             from elevenlabs import ElevenLabs
+            from videocaptioner.core.llm.request_logger import create_http_client
 
             # 创建客户端
-            client = ElevenLabs(api_key=self.api_key)
+            client = ElevenLabs(api_key=self.api_key, httpx_client=create_http_client())
 
             # 获取音色列表
             voiceslist = client.voices.get_all()
@@ -1995,9 +2076,8 @@ class VoicePreviewThread(QThread):
             raise ValueError("ElevenLabs 需要 API Key")
 
         from elevenlabs import ElevenLabs
-        client = ElevenLabs(api_key=self.api_key)
-
-        # 使用用户选择的模型，默认 eleven_flash_v2_5
+        from videocaptioner.core.llm.request_logger import create_http_client
+        client = ElevenLabs(api_key=self.api_key, httpx_client=create_http_client())
         model_id = self.model_id if self.model_id else "eleven_flash_v2_5"
 
         response = client.text_to_speech.convert(
@@ -2049,9 +2129,8 @@ class ElevenLabsQuotaThread(QThread):
         """查询配额"""
         try:
             from elevenlabs import ElevenLabs
-            client = ElevenLabs(api_key=self.api_key)
-
-            # 调用正确的 API：user.subscription.get()
+            from videocaptioner.core.llm.request_logger import create_http_client
+            client = ElevenLabs(api_key=self.api_key, httpx_client=create_http_client())
             subscription = client.user.subscription.get()
 
             # 提取配额信息

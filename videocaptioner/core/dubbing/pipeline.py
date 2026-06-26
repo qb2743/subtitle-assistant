@@ -20,11 +20,33 @@ from .audio import (
     get_audio_duration_ms,
     mux_dubbed_audio,
 )
-from .models import DubbingConfig, DubbingResult, DubbingSegment, SpeakerProfile
+from videocaptioner.core.speech.api_keys import parse_api_keys
+
+from .models import (
+    DubbingConfig,
+    DubbingResult,
+    DubbingSegment,
+    SpeakerProfile,
+    elevenlabs_concurrent_per_key,
+)
 from .rewriter import rewrite_segments_if_needed
 from .subtitle_parser import load_dubbing_segments
 
 ProgressCallback = Callable[[int, str], None]
+
+
+def resolve_tts_worker_count(config: DubbingConfig, segment_count: int) -> int:
+    """How many segment synthesis tasks may run in parallel."""
+    if segment_count <= 0:
+        return 1
+    if config.provider == "elevenlabs":
+        key_count = max(1, len(parse_api_keys(config.api_key)))
+        per_key_cap = elevenlabs_concurrent_per_key(config.model)
+        per_key = max(1, min(config.tts_workers, per_key_cap))
+        worker_limit = key_count * per_key
+    else:
+        worker_limit = max(1, config.tts_workers)
+    return max(1, min(worker_limit, segment_count))
 
 
 def default_dubbed_audio_path(subtitle_path: str, response_format: str = "mp3") -> str:
@@ -109,7 +131,7 @@ class DubbingPipeline:
         warnings: list[str] = []
         timeline_items: list[tuple[str, int]] = []
         total = len(segments)
-        workers = max(1, min(self.config.tts_workers, total))
+        workers = resolve_tts_worker_count(self.config, total)
         completed = 0
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_pos = {

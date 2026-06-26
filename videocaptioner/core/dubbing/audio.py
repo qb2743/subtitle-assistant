@@ -3,9 +3,17 @@
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from pydub import AudioSegment
+
+# On Windows, suppress "Application Error" crash dialogs for ffmpeg/ffprobe
+_SUBPROCESS_KWARGS: dict = {}
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0003)
+    _SUBPROCESS_KWARGS["creationflags"] = subprocess.CREATE_NO_WINDOW
 
 # Configure ffmpeg/ffprobe paths for pydub
 for _attr, _name in (("converter", "ffmpeg"), ("ffprobe", "ffprobe")):
@@ -47,7 +55,7 @@ def change_tempo(input_path: str, output_path: str, factor: float) -> None:
         ",".join(filters),
         output_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, **_SUBPROCESS_KWARGS)
 
 
 def create_timeline_audio(
@@ -136,7 +144,7 @@ def mux_dubbed_audio(
             "+faststart",
             output_path,
         ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, **_SUBPROCESS_KWARGS)
 
 
 def _atempo_filters(factor: float) -> list[str]:
@@ -173,6 +181,6 @@ def _video_has_audio(video_path: str) -> bool:
         "json",
         video_path,
     ]
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True, **_SUBPROCESS_KWARGS)
     data = json.loads(result.stdout or "{}")
     return bool(data.get("streams"))

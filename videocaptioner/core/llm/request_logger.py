@@ -52,16 +52,46 @@ _BROWSER_UA = (
 
 
 def _disguise_request(request: httpx.Request) -> None:
-    """移除 OpenAI SDK 的机器人标识头，避免被 Cloudflare 拦截"""
-    keys_to_remove = [k for k in request.headers if k.startswith("x-stainless")]
+    """移除 SDK 机器人标识头，避免被 Cloudflare 拦截"""
+    keys_to_remove = [
+        k for k in request.headers
+        if k.lower().startswith(("x-stainless", "x-fern"))
+    ]
     for k in keys_to_remove:
         del request.headers[k]
     request.headers["user-agent"] = _BROWSER_UA
 
 
-def create_http_client() -> httpx.Client:
+def create_http_client(timeout: float = 240) -> httpx.Client:
     """创建不含 SDK 机器人标识的 HTTPX 客户端（用于非日志场景）"""
-    return httpx.Client(event_hooks={"request": [_disguise_request]})
+    return httpx.Client(event_hooks={"request": [_disguise_request]}, timeout=timeout)
+
+
+def _patch_elevenlabs_headers() -> None:
+    """Strip SDK headers before httpx sees ElevenLabs requests."""
+    try:
+        from elevenlabs.core.client_wrapper import SyncClientWrapper
+
+        if getattr(SyncClientWrapper.get_headers, "_cf_patched", False):
+            return
+
+        _orig = SyncClientWrapper.get_headers
+
+        def _patched(self):
+            headers = _orig(self)
+            headers["User-Agent"] = _BROWSER_UA
+            for k in ("X-Fern-Language", "X-Fern-SDK-Name",
+                       "X-Fern-SDK-Version"):
+                headers.pop(k, None)
+            return headers
+
+        _patched._cf_patched = True
+        SyncClientWrapper.get_headers = _patched
+    except Exception:
+        pass
+
+
+_patch_elevenlabs_headers()
 
 
 # ==================== HTTPX Hooks ====================

@@ -7,6 +7,24 @@ from typing import Literal, Optional
 DubbingProvider = Literal["siliconflow", "gemini", "edge", "elevenlabs", "dots", "voxcpm", "openai"]
 FitMode = Literal["none", "tempo"]
 
+# ElevenLabs per-account concurrency (free tier; varies by model family).
+# Flash / Turbo: 4 simultaneous TTS requests per key; other models (e.g. Multilingual v2): 2.
+ELEVENLABS_CONCURRENT_PER_KEY_DEFAULT = 2
+ELEVENLABS_CONCURRENT_PER_KEY_FLASH = 4
+
+
+def elevenlabs_concurrent_per_key(model: str) -> int:
+    """Max in-flight TTS requests per API key for the given ElevenLabs model id."""
+    mid = (model or "").strip().lower()
+    if "flash" in mid or "turbo" in mid:
+        return ELEVENLABS_CONCURRENT_PER_KEY_FLASH
+    return ELEVENLABS_CONCURRENT_PER_KEY_DEFAULT
+
+
+# Backward-compatible alias (default-tier cap only).
+ELEVENLABS_CONCURRENT_PER_KEY = ELEVENLABS_CONCURRENT_PER_KEY_DEFAULT
+ELEVENLABS_MAX_TTS_WORKERS = ELEVENLABS_CONCURRENT_PER_KEY_DEFAULT
+
 
 @dataclass
 class SpeakerProfile:

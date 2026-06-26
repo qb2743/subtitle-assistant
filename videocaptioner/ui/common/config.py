@@ -256,6 +256,9 @@ class Config(QConfig):
     dubbing_speed = RangeConfigItem(
         "Dubbing", "Speed", 1.0, RangeValidator(0.5, 2.0)
     )
+    dubbing_tts_workers = RangeConfigItem(
+        "Dubbing", "TtsWorkers", 5, RangeValidator(1, 16)
+    )
     dubbing_api_key = ConfigItem("Dubbing", "ApiKey", "")
     dubbing_api_base = ConfigItem("Dubbing", "ApiBase", "https://api.openai.com/v1")
     dubbing_model = ConfigItem("Dubbing", "Model", "eleven_flash_v2_5")

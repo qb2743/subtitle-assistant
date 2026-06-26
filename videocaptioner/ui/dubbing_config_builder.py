@@ -186,6 +186,7 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         model=model,
         voice=voice,
         speed=float(cfg.dubbing_speed.value),
+        tts_workers=int(cfg.dubbing_tts_workers.value),
         fit_mode=fit_mode,
         max_speed=max_speed,
         rewrite_too_long=rewrite,

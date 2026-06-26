@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover
 
 from videocaptioner.core.utils.cache import get_tts_cache
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.llm.request_logger import create_http_client
 
 from .api_keys import parse_api_keys
 from .models import SpeechProviderConfig, SynthesisRequest, SynthesisResult
@@ -366,38 +367,50 @@ class ElevenLabsSpeechSynthesizer:
         attempted = 0
         for key_index, api_key in enumerate(keys_to_try):
             attempted += 1
-            try:
-                client = ElevenLabs(
-                    api_key=api_key,
-                    base_url=self.config.base_url or None,
-                    timeout=self.config.timeout,
-                )
-                response = client.text_to_speech.convert(
-                    voice_id=voice,
-                    text=request.text.strip(),
-                    model_id=model,
-                    output_format=self.OUTPUT_FORMAT,
-                    apply_text_normalization="auto",
-                    voice_settings=voice_settings,
-                )
-                # The SDK returns a lazy Iterator[bytes]; the HTTP request (and
-                # any 401/quota error) happens on iteration, so the write loop
-                # MUST stay inside this try to trigger key rotation on failure.
-                path = Path(request.output_path).with_suffix(".mp3")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("wb") as f:
-                    for chunk in response:
-                        if chunk:
-                            f.write(chunk)
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "ElevenLabs API key %d/%d failed: %s",
-                    key_index + 1,
-                    len(keys_to_try),
-                    exc,
-                )
-                if key_index < len(keys_to_try) - 1 and self._should_try_next_key(exc):
+            path = Path(request.output_path).with_suffix(".mp3")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            success = False
+            for retry_index in range(3):
+                try:
+                    client = ElevenLabs(
+                        api_key=api_key,
+                        base_url=self.config.base_url or None,
+                        timeout=self.config.timeout,
+                        httpx_client=create_http_client(timeout=self.config.timeout),
+                    )
+                    response = client.text_to_speech.convert(
+                        voice_id=voice,
+                        text=request.text.strip(),
+                        model_id=model,
+                        output_format=self.OUTPUT_FORMAT,
+                        apply_text_normalization="auto",
+                        voice_settings=voice_settings,
+                    )
+                    path.unlink(missing_ok=True)
+                    with path.open("wb") as f:
+                        for chunk in response:
+                            if chunk:
+                                f.write(chunk)
+                    success = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    path.unlink(missing_ok=True)
+                    if self._should_retry_same_key(exc) and retry_index < 2:
+                        delay = self._retry_delay(exc, retry_index)
+                        logger.warning("ElevenLabs rate limited; retrying in %.1fs", delay)
+                        time.sleep(delay)
+                        continue
+                    logger.warning(
+                        "ElevenLabs API key %d/%d failed: %s",
+                        key_index + 1,
+                        len(keys_to_try),
+                        exc,
+                    )
+                    break
+
+            if not success:
+                if key_index < len(keys_to_try) - 1 and self._should_try_next_key(last_error):
                     continue
                 break
 
@@ -451,9 +464,26 @@ class ElevenLabsSpeechSynthesizer:
             if status in (401, 402, 403, 404, 429):
                 return True
             body = str(getattr(error, "body", "") or "").lower()
-            if any(word in body for word in ("quota", "rate", "limit", "unauthorized", "permission")):
+            if body and any(word in body for word in ("quota", "rate", "limit", "unauthorized", "permission")):
                 return True
         return False
+
+    def _should_retry_same_key(self, error: Exception | None) -> bool:
+        if ElevenLabsApiError is not None and isinstance(error, ElevenLabsApiError):
+            return getattr(error, "status_code", None) == 429
+        return False
+
+    @staticmethod
+    def _retry_delay(error: Exception | None, retry_index: int) -> float:
+        headers = getattr(error, "headers", None) or {}
+        for key, divisor in (("retry-after-ms", 1000), ("retry-after", 1)):
+            value = headers.get(key) or headers.get(key.title())
+            try:
+                if value is not None:
+                    return max(1.0, min(float(value) / divisor, 30.0))
+            except (TypeError, ValueError):
+                pass
+        return float(min(2 ** retry_index, 8))
 
     def _extra(self, key: str, default):
         value = self.config.extra.get(key)
@@ -467,13 +497,28 @@ class ElevenLabsSpeechSynthesizer:
             return "ElevenLabs API key is invalid or unauthorized"
         if ElevenLabsApiError is not None and isinstance(exc, ElevenLabsApiError):
             status = getattr(exc, "status_code", None)
+            detail = ElevenLabsSpeechSynthesizer._api_error_detail(exc)
             if status in (401, 403):
-                return "ElevenLabs API key is invalid or unauthorized"
-            if status == 402 or status == 429:
-                return "ElevenLabs quota exceeded or rate limited"
-            body = str(getattr(exc, "body", "") or "")
-            return f"ElevenLabs API error ({status}): {body[:200]}"
+                return f"ElevenLabs API key is invalid or unauthorized: {detail}"
+            if status == 402:
+                return f"ElevenLabs payment or quota error: {detail}"
+            if status == 429:
+                return f"ElevenLabs rate limit hit after retries: {detail}"
+            return f"ElevenLabs API error ({status}): {detail}"
         return f"ElevenLabs TTS failed: {exc}"
+
+    @staticmethod
+    def _api_error_detail(exc: Exception) -> str:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            detail = body.get("detail") or body.get("error") or body.get("message")
+            if isinstance(detail, dict):
+                message = detail.get("message") or detail.get("status") or str(detail)
+            else:
+                message = str(detail or body)
+        else:
+            message = str(body or exc)
+        return message[:300]
 
 
 class OpenAISpeechSynthesizer:
@@ -559,7 +604,7 @@ def list_elevenlabs_voices(
         )
     if not api_key:
         raise ValueError("ElevenLabs API key is required")
-    client = ElevenLabs(api_key=api_key, base_url=base_url or None, timeout=timeout)
+    client = ElevenLabs(api_key=api_key, base_url=base_url or None, timeout=timeout, httpx_client=create_http_client(timeout=timeout))
     response = client.voices.get_all(show_legacy=include_legacy)
     voices: list[dict[str, Any]] = []
     for voice in response.voices:

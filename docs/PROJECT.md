@@ -43,8 +43,6 @@
 | [docs/PACKAGING.md](PACKAGING.md) | Windows 安装包构建 |
 | [docs/RELEASE_AND_GITHUB.md](RELEASE_AND_GITHUB.md) | 推 GitHub、Release、需你提供的信息 |
 
-根目录下大量 `DUBBING_*`、`UI_*` 等 `.md` 已迁入 `docs/archive/`，避免重复维护。
-
 ---
 
 ## GitHub

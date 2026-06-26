@@ -53,6 +53,10 @@ secrets.*
 *.bak
 .cache/
 
+# 根目录临时调试脚本与归档（仅本地，勿提交；正式测试在 tests/）
+/test_*.py
+/archive/
+
 # 大型本地工具（Faster-Whisper 4GB+，勿提交）
 resource/bin/Faster-Whisper-XXL/
 

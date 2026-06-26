@@ -28,8 +28,6 @@ pip install -e ".[gui]"
 - **TTS**：`BaseTTS` / `GradioBaseTTS`；本地引擎见 `local_tts_defaults.py`  
 - **LLM Base URL**：`normalize_base_url` — 仅当 path 为空时补 `/v1`  
 
-更细的 TTS 对比与优化笔记见 `docs/archive/` 内 `tts_architecture_comparison.md`、`implementation_plan_optimized.md` 等。
-
 ## 品牌与版本
 
 - 显示名：**字幕助手 v1.0**（`APP_NAME`、`main_window` 标题）  

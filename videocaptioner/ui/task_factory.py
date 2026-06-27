@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 from videocaptioner.config import MODEL_PATH
+from videocaptioner.ui.common.config import cfg
 from videocaptioner.core.entities import (
     LANGUAGES,
     FullProcessTask,

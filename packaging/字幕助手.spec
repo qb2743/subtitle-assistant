@@ -29,6 +29,11 @@ def _datas():
     ff = SLIM / "bin" / "ffmpeg" / "ffmpeg.exe"
     if ff.is_file():
         pairs.append((str(ff.parent), "resource/bin/ffmpeg"))
+    # LLM 提示词 .md 文件：运行时由 prompts/__init__.py 用 Path(__file__).parent 读取，
+    # PyInstaller 默认只收集 .py，不打包 .md → 打包后翻译/优化/拆分全部 FileNotFoundError
+    prompts = ROOT / "videocaptioner" / "core" / "prompts"
+    if prompts.is_dir():
+        pairs.append((str(prompts), "videocaptioner/core/prompts"))
     return pairs
 
 

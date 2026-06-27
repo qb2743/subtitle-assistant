@@ -1,9 +1,9 @@
-; Inno Setup script — 字幕助手 1.0.0
+; Inno Setup script — 字幕助手 1.0.1
 ; 用法: ISCC.exe "packaging/字幕助手.iss"
 ; 依赖: 先用 build_pyinstaller.ps1 生成 dist/字幕助手/
 
 #define MyAppName "字幕助手"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "qb2743"
 #define MyAppExeName "字幕助手.exe"
 #define MyAppAssocName MyAppName + " 文件"

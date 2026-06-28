@@ -37,3 +37,27 @@ def test_align_text_to_asr_produces_srt():
     srt = aligned.to_srt()
     assert "你好世界" in srt
     assert "-->" in srt
+
+
+def test_align_text_to_asr_preserves_punctuation():
+    # Punctuation guides DTW splitting but is stripped from the final subtitle
+    # text (only ASCII apostrophe ' survives).
+    asr = ASRData([ASRDataSeg(text="你好世界", start_time=0, end_time=2000)])
+    aligned = align_text_to_asr(asr, "你好，世界！", max_chars=30)
+    assert aligned.segments[0].text == "你好世界"
+
+
+def test_align_text_to_asr_default_splits_multi_sentence_paragraph():
+    # With the UI default max_chars=0, a paragraph of several sentences must
+    # become several subtitles — not one giant merged segment.
+    asr = ASRData(
+        [
+            ASRDataSeg(text="你好世界今天天气真好我们去公园", start_time=0, end_time=6000),
+        ]
+    )
+    aligned = align_text_to_asr(asr, "你好世界。今天天气真好！我们去公园！", max_chars=0)
+    assert len(aligned.segments) == 3
+    # Punctuation used for splitting is stripped from the displayed text.
+    assert aligned.segments[0].text == "你好世界"
+    assert aligned.segments[1].text == "今天天气真好"
+    assert aligned.segments[2].text == "我们去公园"

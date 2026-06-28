@@ -34,18 +34,39 @@ def _user_text_to_sentences(
     language: str,
     smart_split: bool,
 ) -> list[str]:
-    """Split user transcript for DTW. ``max_chars <= 0`` = no length limit (by paragraph)."""
+    """Split user transcript for DTW. ``max_chars <= 0`` = split by sentence only."""
     text = user_text.strip()
     if not text:
         return []
 
     if max_chars <= 0:
-        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-        return lines if lines else [text]
+        # No length cap, but still split by sentence-ending punctuation so each
+        # sentence becomes its own subtitle instead of feeding whole paragraphs
+        # to DTW as one giant merged segment.
+        return _split_into_sentences(text)
 
     if language == "en" and smart_split:
         return _split_english_by_words(text, max_chars)
     return split_text_into_segments(text, max_chars=max_chars)
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    """Split by newline then sentence-ending punctuation; never merge across sentences."""
+    import re
+
+    sentences: list[str] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"([。！？.!?;；])", line)
+        for i in range(0, len(parts), 2):
+            chunk = parts[i]
+            punct = parts[i + 1] if i + 1 < len(parts) else ""
+            seg = (chunk + punct).strip()
+            if seg:
+                sentences.append(seg)
+    return sentences if sentences else [text]
 
 
 def align_text_to_asr(
@@ -66,7 +87,9 @@ def align_text_to_asr(
 
     Returns:
         A new :class:`ASRData` whose segments carry the user's text on the
-        ASR's timeline (millisecond timings). Punctuation is stripped except ``'``.
+        ASR's timeline (millisecond timings). Sentence punctuation is kept
+        during DTW alignment for accurate splitting, then stripped from the
+        final subtitle text (ASCII apostrophe ``'`` preserved).
     """
     recognized = [
         {"start": seg.start_time / 1000.0, "end": seg.end_time / 1000.0, "text": seg.text}
@@ -235,7 +258,7 @@ class TextMatchingTask:
         return TranscribeConfig(
             transcribe_model=TranscribeModelEnum.FASTER_WHISPER,
             transcribe_language=lang,
-            need_word_time_stamp=False,
+            need_word_time_stamp=True,
         )
 
     @staticmethod

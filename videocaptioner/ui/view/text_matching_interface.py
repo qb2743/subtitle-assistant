@@ -145,6 +145,7 @@ class TranscriptInputCard(CardWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
+        self.setAcceptDrops(True)
 
         # 标题栏
         header_layout = QHBoxLayout()
@@ -162,17 +163,19 @@ class TranscriptInputCard(CardWidget):
         # 文本输入框
         self.text_edit = PlainTextEdit(self)
         self.text_edit.setPlaceholderText(
-            "在这里粘贴或输入正确的文稿文本...\n\n"
+            "在这里粘贴或输入正确的文稿文本，也可拖拽 txt / srt 文件到此...\n\n"
             "支持中英文，会自动检测语言。\n"
+            "拖入 txt：直接读取文本；拖入 srt/ass/vtt：自动去除序号与时间轴，仅取纯文本。\n"
             "文稿将通过 DTW 算法对齐到 ASR 识别的时间轴上。"
         )
         self.text_edit.setMinimumHeight(300)
+        self.text_edit.setAcceptDrops(False)  # 由卡片接管拖拽，避免 PlainTextEdit 自带的文件拖入行为
         self.text_edit.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.text_edit)
 
         # 按钮栏
         btn_layout = QHBoxLayout()
-        self.import_btn = PushButton(FIF.DOCUMENT, "导入 TXT", self)
+        self.import_btn = PushButton(FIF.DOCUMENT, "导入 TXT / 字幕", self)
         self.import_btn.clicked.connect(self._import_file)
         self.clear_btn = ToolButton(FIF.DELETE, self)
         self.clear_btn.clicked.connect(self.text_edit.clear)
@@ -192,25 +195,79 @@ class TranscriptInputCard(CardWidget):
         self.textChanged.emit()
 
     def _import_file(self):
-        """导入文本文件"""
+        """导入文本文件（txt/md 直读，字幕文件去时间轴取纯文本）"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择文本文件", "", "文本文件 (*.txt *.md);;所有文件 (*.*)"
+            self, "选择文本文件", "",
+            "文本与字幕 (*.txt *.md *.srt *.ass *.vtt);;所有文件 (*.*)",
         )
         if file_path:
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    self.text_edit.setPlainText(f.read())
-            except Exception as e:
+            self._load_text_file(file_path)
+
+    def _load_text_file(self, file_path: str):
+        """读取文件并填入文本框；字幕格式自动剥离序号与时间轴。"""
+        try:
+            text = _extract_text_from_file(file_path)
+            if text is None:
                 InfoBar.error(
                     title="导入失败",
-                    content=f"无法读取文件: {str(e)}",
+                    content="无法识别的文件类型，支持 txt/md/srt/ass/vtt。",
                     duration=INFOBAR_DURATION_ERROR,
                     position=InfoBarPosition.TOP,
                     parent=self,
                 )
+                return
+            self.text_edit.setPlainText(text)
+        except Exception as e:
+            InfoBar.error(
+                title="导入失败",
+                content=f"无法读取文件: {str(e)}",
+                duration=INFOBAR_DURATION_ERROR,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                p = url.toLocalFile()
+                if p and _is_supported_text_file(p):
+                    event.acceptProposedAction()
+                    return
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p and _is_supported_text_file(p):
+                self._load_text_file(p)
+                event.acceptProposedAction()
+                return
 
     def get_text(self) -> str:
         return self.text_edit.toPlainText().strip()
+
+
+# 支持拖拽 / 导入的纯文本与字幕扩展名。
+_TEXT_EXTS = {".txt", ".md"}
+_SUBTITLE_EXTS = {".srt", ".ass", ".vtt", ".ssa", ".sub"}
+
+
+def _is_supported_text_file(path: str) -> bool:
+    suffix = Path(path).suffix.lower()
+    return suffix in _TEXT_EXTS or suffix in _SUBTITLE_EXTS
+
+
+def _extract_text_from_file(path: str) -> Optional[str]:
+    """读取文件为纯文本。txt/md 直接读；字幕格式剥离序号与时间轴。"""
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix in _TEXT_EXTS:
+        return p.read_text(encoding="utf-8")
+    if suffix in _SUBTITLE_EXTS:
+        from videocaptioner.core.asr.asr_data import ASRData
+
+        asr = ASRData.from_subtitle_file(str(p))
+        return asr.to_txt() if asr.has_data() else ""
+    return None
 
 
 class TextMatchingInterface(QWidget):

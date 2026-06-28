@@ -25,7 +25,7 @@ def _build_transcribe_config(language: str) -> TranscribeConfig:
     return TranscribeConfig(
         transcribe_model=cfg.transcribe_model.value,
         transcribe_language=_ui_language_to_transcribe(language),
-        need_word_time_stamp=False,
+        need_word_time_stamp=True,  # 逐字时间戳：DTW 对齐到字级，时间更准；停顿处可断句
         output_format=TranscribeOutputFormatEnum.SRT,
         whisper_model=cfg.whisper_model.value,
         whisper_api_key=cfg.whisper_api_key.value,

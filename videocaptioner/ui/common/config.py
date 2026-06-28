@@ -246,7 +246,7 @@ class Config(QConfig):
     # ------------------- 配音配置 -------------------
     dubbing_provider = ConfigItem("Dubbing", "Provider", "edge")
     dubbing_voice = ConfigItem("Dubbing", "Voice", "")
-    dubbing_timing = ConfigItem("Dubbing", "Timing", "balanced")
+    dubbing_timing = ConfigItem("Dubbing", "Timing", "natural")
     dubbing_audio_mode = ConfigItem("Dubbing", "AudioMode", "replace")
     dubbing_adapt_length = ConfigItem("Dubbing", "AdaptLength", False, BoolValidator())
     dubbing_fixed_line_pause = ConfigItem("Dubbing", "FixedLinePause", False, BoolValidator())

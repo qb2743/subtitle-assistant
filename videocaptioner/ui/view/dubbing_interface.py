@@ -495,7 +495,7 @@ class DubbingInterface(QWidget):
         self.speed_spin.setSingleStep(0.05)
         self.speed_spin.setDecimals(2)
         self.speed_spin.setSuffix("x")
-        self.speed_spin.setFixedWidth(80)
+        self.speed_spin.setFixedWidth(140)
         self.speed_spin.valueChanged.connect(self._on_speed_spin_changed)
         speed_layout.addWidget(self.speed_spin)
 
@@ -522,7 +522,7 @@ class DubbingInterface(QWidget):
         self.workers_spin.setRange(1, 16)
         self.workers_spin.setValue(5)
         self.workers_spin.setSuffix(" 路")
-        self.workers_spin.setFixedWidth(88)
+        self.workers_spin.setFixedWidth(140)
         self.workers_spin.setToolTip(self.workers_slider.toolTip())
         self.workers_spin.valueChanged.connect(self._on_workers_spin_changed)
         workers_layout.addWidget(self.workers_spin)
@@ -671,6 +671,12 @@ class DubbingInterface(QWidget):
         self.start_btn.setFixedHeight(36)
         self.start_btn.clicked.connect(self._start_dubbing)
         right_layout.addWidget(self.start_btn)
+
+        self.open_folder_btn = PushButton(FIF.FOLDER, "打开输出目录", self)
+        self.open_folder_btn.setFixedHeight(36)
+        self.open_folder_btn.setVisible(False)
+        self.open_folder_btn.clicked.connect(self._open_output_folder)
+        right_layout.addWidget(self.open_folder_btn)
 
         # 进度
         self.progress_bar = ProgressBar(self)
@@ -1881,6 +1887,8 @@ class DubbingInterface(QWidget):
         self.start_btn.setEnabled(True)
         self.progress_bar.setValue(100)
         self.status_label.setText("配音完成！")
+        self._last_output_path = output_path
+        self.open_folder_btn.setVisible(True)
 
         InfoBar.success(
             title="配音成功",
@@ -1891,6 +1899,16 @@ class DubbingInterface(QWidget):
         )
 
         self.finished.emit(output_path)
+
+    def _open_output_folder(self):
+        """打开输出文件所在目录"""
+        import subprocess
+        path = getattr(self, "_last_output_path", None)
+        if path and Path(path).exists():
+            subprocess.Popen(["explorer", "/select,", str(Path(path))])
+        elif path:
+            import os
+            os.startfile(str(Path(path).parent))
 
     def cleanup_preview_files(self):
         """清理试听临时文件"""

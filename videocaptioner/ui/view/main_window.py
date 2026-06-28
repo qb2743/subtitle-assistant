@@ -81,7 +81,7 @@ class MainWindow(FluentWindow):
 
     def initWindow(self):
         """初始化窗口"""
-        self.resize(1050, 800)
+        self.resize(1200, 800)
         self.setMinimumWidth(700)
         self.setWindowIcon(QIcon(str(LOGO_PATH)))
         self.setWindowTitle(self.tr("字幕助手 v1.0"))
@@ -108,7 +108,9 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, event):
         try:
-            self.homeInterface.dubbing_interface.save_config()
+            dub = self.homeInterface.dubbing_interface
+            dub._stop_local_service()
+            dub.save_config()
         except Exception:
             pass
         super().closeEvent(event)

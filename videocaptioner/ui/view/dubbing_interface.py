@@ -220,7 +220,7 @@ class DubbingInterface(QWidget):
         self.last_quota_percentage = 0  # 上次查询的配额百分比
         self.last_quota_info = None
         self.is_playing = False  # 音频播放状态
-        self._config_loading = False
+        self._config_loading = True
         self.setup_ui()
         self._connect_dubbing_auto_save()
         self.load_config()
@@ -316,9 +316,9 @@ class DubbingInterface(QWidget):
         # 语言选择
         lang_layout = QHBoxLayout()
         lang_layout.setSpacing(8)
-        lang_label = BodyLabel("语言:", self)
-        lang_label.setFixedWidth(60)
-        lang_layout.addWidget(lang_label)
+        self.lang_label = BodyLabel("语言:", self)
+        self.lang_label.setFixedWidth(60)
+        lang_layout.addWidget(self.lang_label)
 
         self.language_combo = ComboBox(self)
         self.language_combo.setPlaceholderText("选择语言")
@@ -328,9 +328,9 @@ class DubbingInterface(QWidget):
         # 音色选择
         voice_select_layout = QHBoxLayout()
         voice_select_layout.setSpacing(8)
-        voice_label = BodyLabel("音色:", self)
-        voice_label.setFixedWidth(60)
-        voice_select_layout.addWidget(voice_label)
+        self.voice_label = BodyLabel("音色:", self)
+        self.voice_label.setFixedWidth(60)
+        voice_select_layout.addWidget(self.voice_label)
 
         self.voice_combo = ComboBox(self)
         self.voice_combo.setPlaceholderText("选择音色")
@@ -361,6 +361,29 @@ class DubbingInterface(QWidget):
         ])
         model_layout.addWidget(self.model_combo, 1)
         voice_layout.addLayout(model_layout)
+
+        # 音色预设（dots/voxcpm 专用）
+        preset_layout = QHBoxLayout()
+        preset_layout.setSpacing(8)
+        self.preset_label = BodyLabel("音色预设:", self)
+        self.preset_label.setFixedWidth(60)
+        preset_layout.addWidget(self.preset_label)
+        self.preset_combo = ComboBox(self)
+        self.preset_combo.setPlaceholderText("选择已保存的音色预设")
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
+        preset_layout.addWidget(self.preset_combo, 1)
+        self.preset_save_btn = ToolButton(FIF.SAVE, self)
+        self.preset_save_btn.setToolTip("保存当前音色为预设")
+        self.preset_save_btn.clicked.connect(self._save_voice_preset)
+        preset_layout.addWidget(self.preset_save_btn)
+        self.preset_delete_btn = ToolButton(FIF.DELETE, self)
+        self.preset_delete_btn.setToolTip("删除选中的预设")
+        self.preset_delete_btn.clicked.connect(self._delete_voice_preset)
+        preset_layout.addWidget(self.preset_delete_btn)
+        voice_layout.addLayout(preset_layout)
+        # 默认隐藏
+        for w in (self.preset_label, self.preset_combo, self.preset_save_btn, self.preset_delete_btn):
+            w.setVisible(False)
 
         clone_audio_layout = QHBoxLayout()
         self.clone_audio_label = BodyLabel("参考音频:", self)
@@ -397,6 +420,7 @@ class DubbingInterface(QWidget):
 
         self.clone_audio_path = ""
         self.clone_audio_text = ""
+        self._launched_start_script = ""
 
         # 默认隐藏模型选择
         self.model_label.setVisible(False)
@@ -413,13 +437,13 @@ class DubbingInterface(QWidget):
 
         # 右侧布局
         right_layout = QVBoxLayout()
-        right_layout.setSpacing(12)
+        right_layout.setSpacing(8)
 
         # 配音参数
         params_card = CardWidget(self)
         params_layout = QVBoxLayout(params_card)
-        params_layout.setContentsMargins(15, 15, 15, 15)
-        params_layout.setSpacing(10)
+        params_layout.setContentsMargins(15, 10, 15, 10)
+        params_layout.setSpacing(6)
 
         params_title = BodyLabel("配音参数", self)
         params_layout.addWidget(params_title)
@@ -538,8 +562,8 @@ class DubbingInterface(QWidget):
         # API Key
         api_card = CardWidget(self)
         api_layout = QVBoxLayout(api_card)
-        api_layout.setContentsMargins(15, 15, 15, 15)
-        api_layout.setSpacing(10)
+        api_layout.setContentsMargins(15, 10, 15, 10)
+        api_layout.setSpacing(6)
 
         api_title = BodyLabel("API 配置", self)
         api_layout.addWidget(api_title)
@@ -584,6 +608,10 @@ class DubbingInterface(QWidget):
         self.start_script_btn.setToolTip("选择启动脚本")
         self.start_script_btn.clicked.connect(self._select_start_script)
         start_script_layout.addWidget(self.start_script_btn)
+        self.launch_service_btn = ToolButton(FIF.PLAY_SOLID, self)
+        self.launch_service_btn.setToolTip("启动本地 TTS 服务")
+        self.launch_service_btn.clicked.connect(self._launch_local_service)
+        start_script_layout.addWidget(self.launch_service_btn)
         api_layout.addLayout(start_script_layout)
 
         package_layout = QHBoxLayout()
@@ -603,6 +631,7 @@ class DubbingInterface(QWidget):
 
         self.local_service_hint = BodyLabel("", self)
         self.local_service_hint.setStyleSheet("color: #888; font-size: 12px;")
+        self.local_service_hint.setVisible(False)
         api_layout.addWidget(self.local_service_hint)
 
         # API Key 输入和测试按钮
@@ -642,29 +671,21 @@ class DubbingInterface(QWidget):
         api_hint = BodyLabel("💡 支持多 Key：换行或英文逗号分隔", self)
         api_hint.setStyleSheet("color: #888; font-size: 12px;")
         api_layout.addWidget(api_hint)
+        self.api_hint_label = api_hint
 
-        right_layout.addWidget(api_card)
-
-        # 输出路径
-        output_card = CardWidget(self)
-        output_layout = QVBoxLayout(output_card)
-        output_layout.setContentsMargins(15, 15, 15, 15)
-
-        output_title = BodyLabel("输出", self)
-        output_layout.addWidget(output_title)
-
+        # 输出路径（嵌入 API 卡片内）
+        output_sep = BodyLabel("输出", self)
+        api_layout.addWidget(output_sep)
         path_layout = QHBoxLayout()
         self.output_edit = LineEdit(self)
         self.output_edit.setPlaceholderText("自动生成输出路径")
         path_layout.addWidget(self.output_edit)
-
         browse_btn = ToolButton(FIF.FOLDER, self)
         browse_btn.clicked.connect(self._browse_output)
         path_layout.addWidget(browse_btn)
+        api_layout.addLayout(path_layout)
 
-        output_layout.addLayout(path_layout)
-
-        right_layout.addWidget(output_card)
+        right_layout.addWidget(api_card)
 
         # 执行按钮
         self.start_btn = PrimaryPushButton(FIF.PLAY, "开始配音", self)
@@ -738,7 +759,7 @@ class DubbingInterface(QWidget):
         provider = provider_text.split(" - ")[0].strip().lower()
 
         timing_text = self.timing_combo.currentText()
-        timing_value = timing_text.split(" - ")[0] if " - " in timing_text else timing_text
+        timing_value = timing_text.split(" - ")[0].strip() if " - " in timing_text else timing_text.strip()
 
         audio_mode_text = self.audio_mode_combo.currentText()
         audio_mode_value = (
@@ -846,9 +867,8 @@ class DubbingInterface(QWidget):
             cache_file = CACHE_PATH / f"voices_{provider}.json"
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(voices, f, ensure_ascii=False, indent=2)
-            print(f"已保存 {provider} 音色列表到: {cache_file}")
         except Exception as e:
-            print(f"保存音色缓存失败: {e}")
+            pass
 
     def _load_voice_cache(self, provider: str) -> list:
         """从缓存文件加载音色列表"""
@@ -859,10 +879,9 @@ class DubbingInterface(QWidget):
             if cache_file.exists():
                 with open(cache_file, "r", encoding="utf-8") as f:
                     voices = json.load(f)
-                print(f"已从缓存加载 {provider} 音色列表，共 {len(voices)} 个")
                 return voices
-        except Exception as e:
-            print(f"加载音色缓存失败: {e}")
+        except Exception:
+            pass
         return []
 
     def _query_elevenlabs_quota(self):
@@ -930,15 +949,10 @@ class DubbingInterface(QWidget):
         if percentage >= 95:
             # 配额几乎用完：每5分钟检查一次
             interval_ms = 5 * 60 * 1000
-            print("配额 ≥95%，启动高频轮询（5分钟）")
         elif percentage >= 90:
-            # 配额接近上限：每15分钟检查一次
             interval_ms = 15 * 60 * 1000
-            print("配额 ≥90%，启动中频轮询（15分钟）")
         else:
-            # 配额充足：每小时检查一次
             interval_ms = 60 * 60 * 1000
-            print("配额 <90%，启动低频轮询（1小时）")
 
         # 创建定时器
         self.quota_poll_timer = QTimer(self)
@@ -954,19 +968,17 @@ class DubbingInterface(QWidget):
                 # 在重置后5分钟查询
                 reset_check_ms = int((time_until_reset + 300) * 1000)
                 QTimer.singleShot(reset_check_ms, self._query_elevenlabs_quota)
-                print(f"已设置重置后自动查询，将在 {time_until_reset/3600:.1f} 小时后执行")
 
     def _stop_quota_polling(self):
         """停止配额轮询"""
         if self.quota_poll_timer:
             self.quota_poll_timer.stop()
             self.quota_poll_timer = None
-            print("已停止配额轮询")
 
     def _on_player_error(self, error):
         """播放器错误处理"""
         if error != QMediaPlayer.NoError:
-            print(f"Media player error: {self.media_player.errorString()}")
+            pass
 
     def load_config(self):
         """从配置加载"""
@@ -1016,9 +1028,13 @@ class DubbingInterface(QWidget):
         if saved_voice:
             self._restore_voice_selection(saved_voice)
 
-        self._maybe_refresh_elevenlabs_quota()
-        self._config_loading = False
+        # _on_provider_changed sets up UI visibility and reloads voice lists;
+        # keep _config_loading=True so it won't overwrite saved values.
+        # It also handles quota refresh for elevenlabs, so no separate call needed.
         self._on_provider_changed(self.provider_combo.currentText())
+        if saved_voice:
+            self._restore_voice_selection(saved_voice)
+        self._config_loading = False
 
     def save_config(self):
         """保存到配置（开始配音前再写一次，与自动保存逻辑一致）。"""
@@ -1093,10 +1109,16 @@ class DubbingInterface(QWidget):
 
         # 根据不同引擎更新界面
         self._set_local_controls_visible(False)
+        # 恢复 API Key 区域可见（dots/voxcpm 会隐藏）
+        for w in (self.api_key_edit, self.manage_keys_btn, self.test_api_btn,
+                  self.api_keys_summary, self.api_hint_label):
+            w.setVisible(True)
         if provider == "edge":
             # Edge TTS：显示语言和音色选择，隐藏 API Base
             logger.info("设置 Edge TTS 界面...")
+            self.lang_label.setVisible(True)
             self.language_combo.setVisible(True)
+            self.voice_label.setVisible(True)
             self.voice_combo.setVisible(True)
             self.preview_btn.setVisible(True)  # Edge TTS 试听
             self.model_label.setVisible(False)  # 隐藏模型选择
@@ -1131,7 +1153,9 @@ class DubbingInterface(QWidget):
 
         elif provider == "elevenlabs":
             # ElevenLabs：需要 API Key，点击测试按钮获取音色
+            self.lang_label.setVisible(False)
             self.language_combo.setVisible(False)
+            self.voice_label.setVisible(True)
             self.voice_combo.setVisible(True)
             self.preview_btn.setVisible(True)  # ElevenLabs 试听
             self.model_label.setVisible(True)  # 显示模型选择
@@ -1188,7 +1212,9 @@ class DubbingInterface(QWidget):
 
         elif provider == "openai":
             # OpenAI TTS：需要 API Key 和 Base URL
+            self.lang_label.setVisible(False)
             self.language_combo.setVisible(False)
+            self.voice_label.setVisible(True)
             self.voice_combo.setVisible(True)
             self.preview_btn.setVisible(True)  # OpenAI 试听
             self.model_label.setVisible(False)  # 隐藏模型选择
@@ -1225,7 +1251,9 @@ class DubbingInterface(QWidget):
                     break
 
         elif provider in ("dots", "voxcpm"):
+            self.lang_label.setVisible(False)
             self.language_combo.setVisible(False)
+            self.voice_label.setVisible(False)
             self.voice_combo.setVisible(False)
             self.preview_btn.setVisible(False)
             self.model_label.setVisible(False)
@@ -1233,9 +1261,12 @@ class DubbingInterface(QWidget):
             self.quota_label.setVisible(False)
             self.reset_date_label.setVisible(False)
             self.hint_label.setText("本地克隆引擎使用参考音频和参考文本，不使用预设音色。")
-            self.api_key_edit.setEnabled(False)
-            self.manage_keys_btn.setEnabled(False)
-            self.test_api_btn.setEnabled(False)
+            # 隐藏 API Key 区域（本地服务不需要）
+            self.api_key_edit.setVisible(False)
+            self.manage_keys_btn.setVisible(False)
+            self.test_api_btn.setVisible(False)
+            self.api_keys_summary.setVisible(False)
+            self.api_hint_label.setVisible(False)
             self.api_base_label.setVisible(False)
             self.api_base_edit.setVisible(False)
             self._load_local_provider_fields(provider)
@@ -1306,10 +1337,7 @@ class DubbingInterface(QWidget):
             self.start_script_label,
             self.start_script_edit,
             self.start_script_btn,
-            self.package_url_label,
-            self.package_url_edit,
-            self.download_package_btn,
-            self.local_service_hint,
+            self.launch_service_btn,
             self.clone_audio_label,
             self.clone_audio_edit,
             self.clone_btn,
@@ -1317,31 +1345,24 @@ class DubbingInterface(QWidget):
             self.clone_text_label,
             self.clone_text_edit,
             self.clone_hint_label,
+            self.preset_label,
+            self.preset_combo,
+            self.preset_save_btn,
+            self.preset_delete_btn,
         ):
             widget.setVisible(visible)
+        # 环境包 URL 仅 voxcpm 显示（dots 无官方整合包）
+        show_pkg = visible and provider == "voxcpm"
+        self.package_url_label.setVisible(show_pkg)
+        self.package_url_edit.setVisible(show_pkg)
+        self.download_package_btn.setVisible(show_pkg)
         self.voxcpm_version_label.setVisible(visible and provider == "voxcpm")
         self.voxcpm_version_combo.setVisible(visible and provider == "voxcpm")
         if visible:
             self._refresh_clone_summary()
-            if provider == "dots":
-                self.local_service_hint.setText(
-                    f"Dots-TTS 需本地 Gradio 服务。项目地址：{DOTS_TTS_PROJECT_URL} "
-                    f"（无官方环境包 zip，请克隆仓库后配置启动脚本；可参考 pyvideotrans：{PYVIDEOTRANS_F5TTS_TUTORIAL_URL}）"
-                )
-            elif provider == "voxcpm":
-                hint = (
-                    f"VoxCPM 需本地 Gradio（默认 WebUI 常为 http://127.0.0.1:7860，与 pyvideotrans 一致）。"
-                    f"项目：{VOXCPM_PROJECT_URL}；部署说明：{PYVIDEOTRANS_F5TTS_TUTORIAL_URL}"
-                )
-                if PYVIDEOTRANS_F5_TTS_BUNDLE_URL:
-                    hint += (
-                        f"。同页提供的 Windows 整合包示例（F5-TTS）：{PYVIDEOTRANS_F5_TTS_BUNDLE_URL}"
-                    )
-                self.local_service_hint.setText(hint)
-            else:
-                self.local_service_hint.setText(
-                    "本地引擎需先启动 Gradio 服务；可配置启动脚本自动拉起，或填写环境包 URL 快速下载。"
-                )
+            self._reload_preset_combo()
+            self.launch_service_btn.setEnabled(True)
+            self.launch_service_btn.setToolTip("启动本地 TTS 服务")
 
     def _on_clone_audio_changed(self, text: str):
         self.clone_audio_path = text.strip()
@@ -1370,6 +1391,183 @@ class DubbingInterface(QWidget):
             self.clone_summary.setText("未选择参考音频")
             self.clone_summary.setStyleSheet("color: #888; font-size: 12px;")
         self.clone_hint_label.setText("Dots-TTS / VoxCPM 需要参考音频；建议 3-10 秒、发音清晰，并填写对应参考文本。")
+
+    # -- 音色预设管理 --------------------------------------------------------
+
+    _PRESETS_FILE = CACHE_PATH / "voice_presets.json"
+
+    def _load_presets(self) -> list:
+        try:
+            if self._PRESETS_FILE.exists():
+                import json
+                with open(self._PRESETS_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return []
+
+    def _save_presets(self, presets: list):
+        import json
+        self._PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._PRESETS_FILE, "w", encoding="utf-8") as f:
+            json.dump(presets, f, ensure_ascii=False, indent=2)
+
+    def _reload_preset_combo(self):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("自定义（手动填写）")
+        provider = self._provider_id()
+        for p in self._load_presets():
+            if p.get("provider", "") in ("", provider):
+                self.preset_combo.addItem(p["name"], userData=p)
+        self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
+
+    def _on_preset_selected(self, index: int):
+        if index <= 0:
+            return
+        data = self.preset_combo.itemData(index)
+        if not data:
+            return
+        self.clone_audio_edit.setText(data.get("audio_path", ""))
+        self.clone_text_edit.setPlainText(data.get("audio_text", ""))
+
+    def _save_voice_preset(self):
+        audio = self.clone_audio_edit.text().strip()
+        text = self.clone_text_edit.toPlainText().strip()
+        if not audio:
+            InfoBar.warning(
+                title="缺少参考音频",
+                content="请先选择参考音频文件再保存预设。",
+                duration=INFOBAR_DURATION_WARNING,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+        from PyQt5.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "保存音色预设", "预设名称:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        presets = self._load_presets()
+        # 同名覆盖
+        presets = [p for p in presets if p.get("name") != name]
+        from datetime import datetime
+        presets.append({
+            "name": name,
+            "audio_path": audio,
+            "audio_text": text,
+            "provider": self._provider_id(),
+            "created": datetime.now().isoformat(),
+        })
+        self._save_presets(presets)
+        self._reload_preset_combo()
+        # 选中刚保存的
+        for i in range(self.preset_combo.count()):
+            d = self.preset_combo.itemData(i)
+            if d and d.get("name") == name:
+                self.preset_combo.setCurrentIndex(i)
+                break
+        InfoBar.success(
+            title="已保存",
+            content=f"音色预设「{name}」已保存。",
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+
+    def _delete_voice_preset(self):
+        idx = self.preset_combo.currentIndex()
+        if idx <= 0:
+            InfoBar.warning(
+                title="无法删除",
+                content="请先选择一个已保存的预设。",
+                duration=INFOBAR_DURATION_WARNING,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+        data = self.preset_combo.itemData(idx)
+        if not data:
+            return
+        name = data.get("name", "")
+        presets = [p for p in self._load_presets() if p.get("name") != name]
+        self._save_presets(presets)
+        self._reload_preset_combo()
+        InfoBar.success(
+            title="已删除",
+            content=f"音色预设「{name}」已删除。",
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+
+    # -- 启动本地 TTS 服务 ---------------------------------------------------
+
+    def _launch_local_service(self):
+        import subprocess
+        script = self.start_script_edit.text().strip()
+        if not script or not Path(script).is_file():
+            InfoBar.warning(
+                title="缺少启动脚本",
+                content="请先配置启动脚本路径（.ps1 / .bat）。",
+                duration=INFOBAR_DURATION_WARNING,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+        self.launch_service_btn.setEnabled(False)
+        self.launch_service_btn.setToolTip("启动中...")
+        self._launched_start_script = script
+        try:
+            subprocess.Popen(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", script],
+                cwd=str(Path(script).parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            self._launched_start_script = ""
+            self.launch_service_btn.setEnabled(True)
+            self.launch_service_btn.setToolTip("启动本地 TTS 服务")
+            InfoBar.error(
+                title="启动失败",
+                content=str(exc),
+                duration=INFOBAR_DURATION_ERROR,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+        self._poll_service_ready(attempts=0)
+
+    def _poll_service_ready(self, attempts: int):
+        url = self.local_url_edit.text().strip() or "http://127.0.0.1:7860"
+        try:
+            from urllib.request import urlopen
+            with urlopen(url, timeout=2) as resp:
+                if 200 <= resp.status < 500:
+                    self.launch_service_btn.setToolTip("服务运行中")
+                    InfoBar.success(
+                        title="服务已启动",
+                        content=f"本地 TTS 服务已就绪：{url}",
+                        duration=INFOBAR_DURATION_SUCCESS,
+                        position=InfoBarPosition.TOP,
+                        parent=self,
+                    )
+                    return
+        except Exception:
+            pass
+        if attempts >= 45:
+            self.launch_service_btn.setEnabled(True)
+            self.launch_service_btn.setToolTip("启动本地 TTS 服务")
+            InfoBar.warning(
+                title="启动超时",
+                content="服务未在 90 秒内就绪，请检查启动脚本日志。",
+                duration=INFOBAR_DURATION_WARNING,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+        QTimer.singleShot(2000, lambda: self._poll_service_ready(attempts + 1))
 
     def _on_local_url_changed(self, text: str):
         self._persist_dubbing_settings()
@@ -1918,16 +2116,56 @@ class DubbingInterface(QWidget):
             preview_dir = TEMP_PATH / "voice_preview"
             if preview_dir.exists():
                 shutil.rmtree(preview_dir)
-                print(f"已清理试听文件夹: {preview_dir}")
-        except Exception as e:
-            print(f"清理试听文件失败: {e}")
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """窗口关闭时清理和保存"""
         self.cleanup_preview_files()
-        self._stop_quota_polling()  # 停止配额轮询
-        self.save_config()  # 保存配置
+        self._stop_quota_polling()
+        self._stop_local_service()
+        self.save_config()
         super().closeEvent(event)
+
+    def _stop_local_service(self):
+        """关闭软件时自动停止由本软件启动的本地 TTS 服务。"""
+        script = self._launched_start_script
+        if not script:
+            return
+        import subprocess
+        stop_script = self._find_stop_script(script)
+        if stop_script:
+            try:
+                subprocess.Popen(
+                    ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(stop_script)],
+                    cwd=str(stop_script.parent),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    def _find_stop_script(start_script: str) -> Path | None:
+        """根据启动脚本路径推导对应的停止脚本。
+
+        规则：同目录下 start_* → stop_*，或直接找 stop_*.ps1。
+        """
+        p = Path(start_script)
+        name = p.name
+        # start_xxx.ps1 → stop_xxx.ps1
+        if name.lower().startswith("start_"):
+            candidate = p.parent / name.replace("start_", "stop_", 1)
+            if candidate.is_file():
+                return candidate
+            candidate = p.parent / name.lower().replace("start_", "stop_", 1)
+            if candidate.is_file():
+                return candidate
+        # fallback: 同目录下任意 stop_*.ps1
+        for f in p.parent.glob("stop_*.ps1"):
+            return f
+        for f in p.parent.glob("stop_*.bat"):
+            return f
+        return None
 
 
 class LocalPackageDownloadThread(QThread):

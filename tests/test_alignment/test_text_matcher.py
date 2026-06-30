@@ -47,9 +47,37 @@ def test_align_text_to_asr_preserves_punctuation():
     assert aligned.segments[0].text == "你好世界"
 
 
-def test_align_text_to_asr_default_splits_multi_sentence_paragraph():
-    # With the UI default max_chars=0, a paragraph of several sentences must
-    # become several subtitles — not one giant merged segment.
+def test_align_text_to_asr_default_uses_txt2srt_length_split():
+    asr = ASRData(
+        [
+            ASRDataSeg(
+                text="一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十",
+                start_time=0,
+                end_time=8000,
+            ),
+        ]
+    )
+    aligned = align_text_to_asr(
+        asr,
+        "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十",
+    )
+    assert len(aligned.segments) == 2
+
+
+def test_align_text_to_asr_auto_language_keeps_english_words_intact():
+    text = "entered from the dry cave on the left to provide support and brought Juhos body out"
+    asr = ASRData([ASRDataSeg(text=text, start_time=0, end_time=8000)])
+
+    aligned = align_text_to_asr(asr, text, max_chars=30, language="auto")
+
+    joined = "|".join(seg.text for seg in aligned.segments)
+    assert "supp|ort" not in joined
+    assert "support" in joined
+    assert all(len(word) > 1 for seg in aligned.segments for word in seg.text.split())
+
+
+
+    # max_chars=0 means no length cap, but paragraphs still split by sentence.
     asr = ASRData(
         [
             ASRDataSeg(text="你好世界今天天气真好我们去公园", start_time=0, end_time=6000),

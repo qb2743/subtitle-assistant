@@ -23,6 +23,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     ProgressBar,
     PushButton,
+    SpinBox,
     SubtitleLabel,
     ToolButton,
 )
@@ -369,6 +370,22 @@ class TextMatchingInterface(QWidget):
         lang_hint.setStyleSheet("color: #666; font-size: 11px;")
         param_layout.addWidget(lang_hint)
 
+        max_chars_layout = QHBoxLayout()
+        max_chars_layout.addWidget(BodyLabel("每行字数:", self))
+        self.max_chars_spin = SpinBox(self)
+        self.max_chars_spin.setRange(0, 200)
+        self.max_chars_spin.setValue(30)
+        self.max_chars_spin.setSuffix(" 字")
+        self.max_chars_spin.setFixedWidth(140)
+        self.max_chars_spin.setToolTip("与 txt2srt 默认一致：30 字；设为 0 表示不按长度切分")
+        max_chars_layout.addWidget(self.max_chars_spin)
+        max_chars_layout.addStretch()
+        param_layout.addLayout(max_chars_layout)
+
+        max_chars_hint = BodyLabel("💡 30 字更接近原 txt2srt 的时间轴切分", self)
+        max_chars_hint.setStyleSheet("color: #666; font-size: 11px;")
+        param_layout.addWidget(max_chars_hint)
+
         param_layout.addStretch()
         left_layout.addWidget(param_card)
 
@@ -466,6 +483,7 @@ class TextMatchingInterface(QWidget):
         self.worker_thread = TextMatchingThread(
             media_path=media_path,
             user_text=user_text,
+            max_chars=self.max_chars_spin.value(),
             language=language,
         )
 

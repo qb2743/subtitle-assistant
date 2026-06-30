@@ -9,6 +9,7 @@ Public API:
 - :func:`split_text_into_segments`, :func:`remove_punctuation` — text helpers.
 """
 
+from .audio_boundary_snapper import snap_subtitles_to_audio_boundaries
 from .dtw_aligner import (
     align_texts,
     fix_overlapping_timestamps,
@@ -29,6 +30,7 @@ __all__ = [
     "match_user_text_to_timestamps",
     "optimize_subtitle_duration",
     "remove_punctuation",
+    "snap_subtitles_to_audio_boundaries",
     "split_text_into_segments",
     "strip_subtitle_punctuation",
 ]

@@ -23,11 +23,18 @@ def snap_subtitles_to_audio_boundaries(
     audio_path: str,
     window_ms: int = 350,
     padding_ms: int = 40,
+    language: str = "",
 ) -> ASRData:
     """Move subtitle starts/ends to nearby speech-energy boundaries.
 
     This is deliberately conservative: only WAV input is inspected, and each
     edge moves at most ``window_ms``. Non-WAV/unsupported audio returns unchanged.
+
+    English (``language`` starts with "en") gets +20ms extra start padding:
+    English voiceless plosives/fricatives ("p", "t", "k", "s", "f") produce
+    short energy bursts before the voiced vowel that the RMS gate can mistake
+    for onset. The extra delay pushes the subtitle onto the vowel rather than
+    the release burst.
     """
     samples, sample_rate, frame_ms = _read_samples(audio_path)
     if not samples:
@@ -39,11 +46,12 @@ def snap_subtitles_to_audio_boundaries(
         return asr_data
 
     flatness_values = _spectral_flatness_frames(samples, sample_rate, frame_ms)
+    start_padding = padding_ms + (20 if language.lower().startswith("en") else 0)
 
     snapped: list[ASRDataSeg] = []
     total_ms = len(rms_values) * frame_ms
     for seg in asr_data.segments:
-        start = _snap_start(seg.start_time, intervals, window_ms, padding_ms, flatness_values, frame_ms)
+        start = _snap_start(seg.start_time, intervals, window_ms, start_padding, flatness_values, frame_ms)
         end = _snap_end(seg.end_time, intervals, window_ms, padding_ms, total_ms)
         if end <= start:
             start, end = seg.start_time, seg.end_time

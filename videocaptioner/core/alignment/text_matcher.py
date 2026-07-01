@@ -208,7 +208,7 @@ class TextMatchingTask:
             )
             if cfg.snap_audio_boundaries:
                 cb(88, "snapping subtitle boundaries")
-                aligned = snap_subtitles_to_audio_boundaries(aligned, str(audio_path))
+                aligned = snap_subtitles_to_audio_boundaries(aligned, str(audio_path), language=align_language)
             if not aligned.segments:
                 raise RuntimeError("alignment produced no segments")
 

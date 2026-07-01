@@ -102,6 +102,20 @@ def test_snap_start_pushes_silent_start_to_stable_onset_plus_padding(tmp_path):
     assert snapped.segments[0].start_time == 540
 
 
+def test_english_language_adds_extra_start_padding(tmp_path):
+    wav = tmp_path / "speech.wav"
+    _write_wav(wav, [(300, 360), (500, 1000)], total_ms=1100)
+    asr = ASRData([ASRDataSeg("word", 350, 1020)])
+
+    snapped_en = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=40, language="en")
+    snapped_other = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=40, language="zh")
+
+    # English: 500ms stable onset + 40ms base + 20ms English release-burst delay.
+    assert snapped_en.segments[0].start_time == 560
+    # Non-English: just the 40ms base padding.
+    assert snapped_other.segments[0].start_time == 540
+
+
 def test_spectral_flatness_distinguishes_tonal_speech_from_noise_burst():
     import numpy as np
 

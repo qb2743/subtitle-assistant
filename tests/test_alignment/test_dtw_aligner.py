@@ -24,6 +24,17 @@ def test_strip_subtitle_punctuation():
         == "A diver got trapped in a narrow crevice and drowned to death"
     )
     assert strip_subtitle_punctuation("it's fine.") == "it's fine"
+    # Curly apostrophe (U+2019) normalized to ASCII ' only in English.
+    assert strip_subtitle_punctuation("Juho’s body.", language="en") == "Juho's body"
+    # English contraction detected from text even without explicit language:
+    # 's after a letter → apostrophe → normalized to ASCII.
+    assert strip_subtitle_punctuation("don’t go.") == "don't go"
+    # French/Spanish-style quotes (' ') without an English contraction pattern
+    # are quote punctuation, not apostrophes — stripped, not normalized.
+    assert strip_subtitle_punctuation("‘Bonjour’ mon ami.") == "Bonjour mon ami"
+    # In non-English (e.g. Chinese) ' ' are quote punctuation — left as-is, then
+    # removed by the strip set (they're in _SUBTITLE_STRIP_PUNCT).
+    assert strip_subtitle_punctuation("他说‘你好’。", language="zh") == "他说你好"
 
 
 def test_split_text_by_newline():

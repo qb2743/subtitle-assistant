@@ -418,6 +418,15 @@ class TextMatchingInterface(QWidget):
         main_layout.addLayout(content_layout)
 
         self._sync_transcribe_model_from_cfg()
+        self._load_text_match_settings()
+
+    def _load_text_match_settings(self):
+        self.max_chars_spin.setValue(cfg.text_match_max_chars.value)
+        self.max_chars_spin.valueChanged.connect(self._save_max_chars)
+
+    def _save_max_chars(self, value: int):
+        cfg.set(cfg.text_match_max_chars, value)
+        cfg.save()
 
     def _sync_transcribe_model_from_cfg(self):
         """从全局配置恢复识别模型选择。"""

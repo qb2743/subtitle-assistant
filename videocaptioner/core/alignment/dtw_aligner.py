@@ -32,16 +32,42 @@ logger = setup_logger("alignment.dtw")
 # CJK + ASCII punctuation and whitespace stripped before char-level matching.
 _PUNCTUATION = set("。，！？；：、,.!?;: 　「」『』“”‘’（）()【】[]")
 
-# Punctuation removed from final subtitle text (apostrophe ' and spaces kept).
+# Punctuation removed from final subtitle text (ASCII apostrophe ' and spaces kept;
+# curly quotes ‘ ’ “ ” are stripped — English normalizes ’ to ' first so it survives).
 _SUBTITLE_STRIP_PUNCT = set(
     "。，！？；：、,.!?;:　「」『』“”‘’（）()【】[]\"\"…—–·《》〈〉"
 )
 
 
-def strip_subtitle_punctuation(text: str) -> str:
-    """Remove punctuation from displayed subtitle text; keep ASCII apostrophe '."""
+# Contractions/possessives where ' is an apostrophe, not a quote: Juho's, don't,
+# they're, we've, you'll, I'm, she'd. Curly ' is what sources usually ship.
+_ENGLISH_APOSTROPHE = re.compile(r"[’‘]['‘]?(?:s|t|re|ve|ll|m|d)\b", re.IGNORECASE)
+
+
+def _should_normalize_apostrophe(text: str, language: str) -> bool:
+    """True when ' is used as an English apostrophe, not a quote punctuation.
+
+    Explicit English (``language`` starts with "en") → always. Otherwise detect
+    an English contraction/possessive pattern in the text so French/Spanish/etc.
+    quote usage ('¡hola!') is not mistreated.
+    """
+    if language.lower().startswith("en"):
+        return True
+    return bool(_ENGLISH_APOSTROPHE.search(text))
+
+
+def strip_subtitle_punctuation(text: str, language: str = "") -> str:
+    """Remove punctuation from displayed subtitle text; keep ASCII apostrophe '.
+
+    Curly apostrophes (' ') are normalized to ASCII ' when the text is English
+    (explicit ``language`` = "en", or an English contraction/possessive like
+    "Juho's", "don't" is detected). In other languages ' ' are quote
+    punctuation and are stripped, not normalized.
+    """
     if not text:
         return text
+    if _should_normalize_apostrophe(text, language):
+        text = text.replace("‘", "'").replace("’", "'")
     return "".join(c for c in text if c not in _SUBTITLE_STRIP_PUNCT)
 
 
@@ -142,6 +168,7 @@ def _force_split_by_chars(text: str, max_chars: int) -> List[str]:
 def match_user_text_to_timestamps(
     recognized_segments: List[Dict],
     user_sentences: List[str],
+    allow_pause_split: bool = True,
 ) -> List[Dict]:
     """DTW-align user sentences onto recognized segment timestamps.
 
@@ -299,14 +326,18 @@ def match_user_text_to_timestamps(
             break
 
         # Walk the sentence's chars; cut a new sub-segment at each pause.
+        # When the user disabled length-based splitting (max_chars <= 0), keep
+        # each sentence as a single subtitle regardless of internal pauses —
+        # splitting "reached 135 | meters" mid-sentence is worse than a long line.
         threshold = _pause_threshold(start_char_idx, end_char_idx)
         sub_start = start_char_idx
-        for k in range(start_char_idx + 1, end_char_idx):
-            t_prev = user_char_times[k - 1]
-            t_curr = user_char_times[k]
-            if t_prev is not None and t_curr is not None and t_curr - t_prev >= threshold:
-                _append_sub(aligned_segments, sub_start, k)
-                sub_start = k
+        if allow_pause_split:
+            for k in range(start_char_idx + 1, end_char_idx):
+                t_prev = user_char_times[k - 1]
+                t_curr = user_char_times[k]
+                if t_prev is not None and t_curr is not None and t_curr - t_prev >= threshold:
+                    _append_sub(aligned_segments, sub_start, k)
+                    sub_start = k
         _append_sub(aligned_segments, sub_start, end_char_idx)
         char_idx = end_char_idx
 
@@ -418,9 +449,10 @@ def optimize_subtitle_duration(segments: List[Dict], max_gap_fill: float = 2.0) 
 def align_texts(
     recognized_segments: List[Dict],
     user_sentences: List[str],
+    allow_pause_split: bool = True,
 ) -> List[Dict]:
     """Full alignment pipeline: DTW match → merge tiny → fix overlaps → optimize durations."""
-    aligned = match_user_text_to_timestamps(recognized_segments, user_sentences)
+    aligned = match_user_text_to_timestamps(recognized_segments, user_sentences, allow_pause_split=allow_pause_split)
     aligned = _merge_tiny_segments(aligned)
     aligned = fix_overlapping_timestamps(aligned)
     aligned = optimize_subtitle_duration(aligned)

@@ -345,6 +345,9 @@ class Config(QConfig):
     # ------------------- 保存配置 -------------------
     work_dir = ConfigItem("Save", "Work_Dir", WORK_PATH, FolderValidator())
 
+    # ------------------- 文稿匹配配置 -------------------
+    text_match_max_chars = RangeConfigItem("TextMatch", "MaxChars", 30, RangeValidator(0, 200))
+
     # ------------------- 软件页面配置 -------------------
     micaEnabled = ConfigItem("MainWindow", "MicaEnabled", False, BoolValidator())
     dpiScale = OptionsConfigItem(

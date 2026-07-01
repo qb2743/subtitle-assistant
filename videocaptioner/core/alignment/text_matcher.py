@@ -102,15 +102,15 @@ def align_text_to_asr(
 
     user_sentences = _user_text_to_sentences(user_text, max_chars, language, smart_split)
 
-    aligned = align_texts(recognized, user_sentences)
+    aligned = align_texts(recognized, user_sentences, allow_pause_split=(max_chars > 0))
     new_segments = [
         ASRDataSeg(
-            text=strip_subtitle_punctuation(s["text"].strip()),
+            text=strip_subtitle_punctuation(s["text"].strip(), language),
             start_time=int(round(s["start"] * 1000)),
             end_time=int(round(s["end"] * 1000)),
         )
         for s in aligned
-        if strip_subtitle_punctuation(s["text"].strip())
+        if strip_subtitle_punctuation(s["text"].strip(), language)
     ]
     return ASRData(new_segments)
 
@@ -151,6 +151,10 @@ class TextMatchingConfig:
     language: str = ""
     smart_split: bool = True
     snap_audio_boundaries: bool = True
+    # TEMP debug: write a .debug.json beside the output SRT recording per-segment
+    # ASR/DTW/snap timestamps so a mis-aligned subtitle can be diagnosed. Remove
+    # once alignment tuning settles.
+    debug_dump: bool = True
     # Full ASR config; if omitted, a FasterWhisper default is used. The caller
     # typically supplies this (with the chosen engine, model dir, api key, ...).
     transcribe_config: Optional[TranscribeConfig] = None
@@ -206,9 +210,16 @@ class TextMatchingTask:
                 language=align_language,
                 smart_split=cfg.smart_split,
             )
+            dtw_segments = [
+                {"start_ms": s.start_time, "end_ms": s.end_time, "text": s.text}
+                for s in aligned.segments
+            ]
+            snap_chain: list[dict] = []
             if cfg.snap_audio_boundaries:
                 cb(88, "snapping subtitle boundaries")
-                aligned = snap_subtitles_to_audio_boundaries(aligned, str(audio_path), language=align_language)
+                aligned = snap_subtitles_to_audio_boundaries(
+                    aligned, str(audio_path), debug_log=snap_chain if cfg.debug_dump else None
+                )
             if not aligned.segments:
                 raise RuntimeError("alignment produced no segments")
 
@@ -220,11 +231,46 @@ class TextMatchingTask:
                 else media.with_name(media.stem + ".aligned.srt")
             )
             aligned.save(str(out))
+            if cfg.debug_dump:
+                self._write_debug_dump(out, asr_data, dtw_segments, snap_chain)
             cb(100, "completed")
             return out
         finally:
             if temp_audio and Path(temp_audio).exists():
                 Path(temp_audio).unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_debug_dump(
+        srt_path: Path,
+        asr_data: "ASRData",
+        dtw_segments: list[dict],
+        snap_chain: list[dict],
+    ) -> None:
+        """TEMP: dump per-segment timing at each pipeline stage next to the SRT.
+
+        For each final subtitle the chain is: ASR raw segment → DTW aligned
+        segment → snapped segment. When a subtitle shows at the wrong time,
+        reading which stage moved it (or whether ASR itself was off) tells us
+        whether the bug is ASR, DTW, or the snap post-processor.
+        """
+        import json
+
+        asr_segments = [
+            {"start_ms": s.start_time, "end_ms": s.end_time, "text": s.text}
+            for s in asr_data.segments
+        ]
+        dump = {
+            "asr_raw": asr_segments,
+            "dtw_aligned": dtw_segments,
+            "snap_chain": snap_chain,
+        }
+        debug_path = srt_path.with_suffix(".debug.json")
+        try:
+            debug_path.write_text(
+                json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     def _ensure_audio(self, media: Path) -> tuple[str, Optional[str]]:
         """Return (audio_path, temp_audio_path_or_None). Extracts audio from video."""

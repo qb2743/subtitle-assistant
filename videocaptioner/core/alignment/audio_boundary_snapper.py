@@ -29,18 +29,21 @@ def snap_subtitles_to_audio_boundaries(
     This is deliberately conservative: only WAV input is inspected, and each
     edge moves at most ``window_ms``. Non-WAV/unsupported audio returns unchanged.
     """
-    rms_values, frame_ms = _read_rms_frames(audio_path)
-    if not rms_values:
+    samples, sample_rate, frame_ms = _read_samples(audio_path)
+    if not samples:
         return asr_data
 
+    rms_values = _rms_frames_from_samples(samples, sample_rate, frame_ms)
     intervals = _detect_speech_intervals(rms_values, frame_ms=frame_ms)
     if not intervals:
         return asr_data
 
+    flatness_values = _spectral_flatness_frames(samples, sample_rate, frame_ms)
+
     snapped: list[ASRDataSeg] = []
     total_ms = len(rms_values) * frame_ms
     for seg in asr_data.segments:
-        start = _snap_start(seg.start_time, intervals, window_ms, padding_ms)
+        start = _snap_start(seg.start_time, intervals, window_ms, padding_ms, flatness_values, frame_ms)
         end = _snap_end(seg.end_time, intervals, window_ms, padding_ms, total_ms)
         if end <= start:
             start, end = seg.start_time, seg.end_time
@@ -141,6 +144,8 @@ def _snap_start(
     intervals: list[_SpeechInterval],
     window_ms: int,
     padding_ms: int,
+    flatness_values: list[float],
+    frame_ms: int,
     max_shift: int = 300,
     min_run: int = 100,
     min_gap: int = 40,
@@ -154,8 +159,22 @@ def _snap_start(
             return ms
     onset = _find_stable_speech_onset_after(stable, ms, min(max_shift, window_ms))
     if onset is not None and onset - ms >= min_gap:
+        iv = next((i for i in stable if i.start_ms == onset), None)
+        # Borderline-length islands (just over min_run) might still be a breath
+        # or plosive burst. Confirm with spectral flatness: real speech has
+        # formant structure (low flatness), noise bursts are flat (high).
+        if iv is not None and iv.end_ms - iv.start_ms < min_run * 2 and not _flatness_confirms_speech(flatness_values, frame_ms, onset):
+            return ms  # don't shift onto a noise-like island
         return onset + padding_ms
     return ms
+
+
+def _flatness_confirms_speech(flatness_values: list[float], frame_ms: int, onset_ms: int) -> bool:
+    if not flatness_values:
+        return True  # no STFT signal → trust the RMS decision
+    idx = min(len(flatness_values) - 1, max(0, onset_ms // frame_ms))
+    # ponytail: 0.5 separates tonal speech (formants, ~0.1-0.3) from noise bursts (~0.5-0.9)
+    return flatness_values[idx] < 0.5
 
 
 def _find_stable_speech_onset_after(
@@ -179,28 +198,70 @@ def _snap_end(ms: int, intervals: list[_SpeechInterval], window_ms: int, padding
     return min(total_ms, target + padding_ms)
 
 
-def _read_rms_frames(audio_path: str, frame_ms: int = 20) -> tuple[list[float], int]:
+def _read_samples(audio_path: str, frame_ms: int = 20) -> tuple[list[float], int, int]:
     path = Path(audio_path)
     if path.suffix.lower() != ".wav":
         logger.debug("Boundary snapping skipped for non-WAV audio: %s", path)
-        return [], frame_ms
+        return [], 0, frame_ms
 
     try:
         with wave.open(str(path), "rb") as wav:
             channels = wav.getnchannels()
             sample_width = wav.getsampwidth()
             sample_rate = wav.getframerate()
-            frame_count = max(1, int(sample_rate * frame_ms / 1000))
-            rms_values: list[float] = []
-            while True:
-                chunk = wav.readframes(frame_count)
-                if not chunk:
-                    break
-                rms_values.append(_rms(chunk, sample_width, channels))
-            return rms_values, frame_ms
+            raw = wav.readframes(wav.getnframes())
+        return _decode_pcm(raw, sample_width, channels), sample_rate, frame_ms
     except (wave.Error, OSError, EOFError) as exc:
         logger.debug("Boundary snapping skipped; cannot read WAV %s: %s", path, exc)
-        return [], frame_ms
+        return [], 0, frame_ms
+
+
+def _decode_pcm(raw: bytes, sample_width: int, channels: int) -> list[float]:
+    if sample_width == 1:
+        samples = [b - 128 for b in raw]
+    elif sample_width == 2:
+        import struct
+
+        samples = list(struct.unpack(f"<{len(raw) // 2}h", raw))
+    elif sample_width == 4:
+        import struct
+
+        samples = list(struct.unpack(f"<{len(raw) // 4}i", raw))
+    else:
+        return []
+
+    if channels > 1:
+        samples = samples[::channels]
+    return [float(s) for s in samples]
+
+
+def _rms_frames_from_samples(samples: list[float], sample_rate: int, frame_ms: int) -> list[float]:
+    frame_count = max(1, int(sample_rate * frame_ms / 1000))
+    out: list[float] = []
+    for i in range(0, len(samples), frame_count):
+        chunk = samples[i:i + frame_count]
+        if not chunk:
+            break
+        out.append((sum(float(s) * float(s) for s in chunk) / len(chunk)) ** 0.5)
+    return out
+
+
+def _spectral_flatness_frames(samples: list[float], sample_rate: int, frame_ms: int) -> list[float]:
+    # Per-frame spectral flatness via STFT. High flatness (->1) = noise-like
+    # (breath/plosive); low (->0) = tonal/structured (vowels, formants).
+    import numpy as np
+    from scipy.signal import stft
+
+    arr = np.asarray(samples, dtype=np.float32)
+    nperseg = max(256, int(sample_rate * 0.025))
+    if len(arr) < nperseg:
+        return []
+    hop = max(1, int(sample_rate * frame_ms / 1000))
+    noverlap = max(0, nperseg - hop)
+    _, _, Z = stft(arr, fs=sample_rate, nperseg=nperseg, noverlap=noverlap, boundary=None, padded=False)
+    mag = np.maximum(np.abs(Z), 1e-10)
+    flatness = np.exp(np.log(mag).mean(axis=0)) / mag.mean(axis=0)
+    return flatness.astype(np.float32).tolist()
 
 
 def _detect_speech_intervals(
@@ -231,24 +292,3 @@ def _detect_speech_intervals(
         if end - start >= min_speech_ms:
             intervals.append(_SpeechInterval(start, end))
     return intervals
-
-
-def _rms(chunk: bytes, sample_width: int, channels: int) -> float:
-    if sample_width == 1:
-        samples = [b - 128 for b in chunk]
-    elif sample_width == 2:
-        import struct
-
-        samples = struct.unpack(f"<{len(chunk) // 2}h", chunk)
-    elif sample_width == 4:
-        import struct
-
-        samples = struct.unpack(f"<{len(chunk) // 4}i", chunk)
-    else:
-        return 0.0
-
-    if channels > 1:
-        samples = samples[::channels]
-    if not samples:
-        return 0.0
-    return (sum(float(s) * float(s) for s in samples) / len(samples)) ** 0.5

@@ -102,6 +102,33 @@ def test_snap_start_pushes_silent_start_to_stable_onset_plus_padding(tmp_path):
     assert snapped.segments[0].start_time == 540
 
 
+def test_spectral_flatness_distinguishes_tonal_speech_from_noise_burst():
+    import numpy as np
+
+    from videocaptioner.core.alignment.audio_boundary_snapper import (
+        _flatness_confirms_speech,
+        _spectral_flatness_frames,
+    )
+
+    sr = 8000
+    t = np.arange(int(sr * 0.3)) / sr
+    # Tonal signal (formant-like): two sine partials → low flatness.
+    tone = (12000 * np.sin(2 * np.pi * 220 * t) + 8000 * np.sin(2 * np.pi * 440 * t))
+    tone_samples = tone.astype(np.float32).tolist()
+    flat_tone = _spectral_flatness_frames(tone_samples, sr, frame_ms=20)
+    assert flat_tone  # STFT produced frames
+    # Onset frame mid-signal should be confirmed as structured speech.
+    assert _flatness_confirms_speech(flat_tone, frame_ms=20, onset_ms=200) is True
+
+    # White-noise burst → high flatness → not confirmed as speech.
+    rng = np.random.default_rng(0)
+    noise = rng.standard_normal(int(sr * 0.3)) * 12000
+    flat_noise = _spectral_flatness_frames(noise.astype(np.float32).tolist(), sr, frame_ms=20)
+    assert flat_noise
+    assert _flatness_confirms_speech(flat_noise, frame_ms=20, onset_ms=200) is False
+
+
+def test_small_window_does_not_overshoot_when_start_already_at_speech(tmp_path):
     wav = tmp_path / "speech.wav"
     _write_test_wav(wav)
     asr = ASRData([ASRDataSeg("first", 0, 950)])

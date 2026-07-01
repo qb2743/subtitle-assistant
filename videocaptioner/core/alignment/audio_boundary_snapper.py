@@ -136,16 +136,36 @@ def _find_silence_valley(
     return valley_ms
 
 
-def _snap_start(ms: int, intervals: list[_SpeechInterval], window_ms: int, padding_ms: int) -> int:
-    # English final plosives/fricatives (support's "t", left's "t") can create
-    # short energy islands before the next word. Allow only a small backward snap
-    # for starts; otherwise prefer the next speech onset.
-    back_ms = min(120, window_ms)
-    candidates = [iv for iv in intervals if ms - back_ms <= iv.start_ms <= ms + window_ms]
-    if not candidates:
-        return ms
-    target = min(candidates, key=lambda iv: abs(iv.start_ms - ms)).start_ms
-    return max(0, target - min(padding_ms, 20))
+def _snap_start(
+    ms: int,
+    intervals: list[_SpeechInterval],
+    window_ms: int,
+    padding_ms: int,
+    max_shift: int = 300,
+    min_run: int = 100,
+    min_gap: int = 40,
+) -> int:
+    # Land starts on stable speech (>= min_run ms of continuous energy) rather
+    # than short noise/breath/plosive islands. Push the start FORWARD only --
+    # never show the subtitle early. A start already inside speech is untouched.
+    stable = [iv for iv in intervals if iv.end_ms - iv.start_ms >= min_run]
+    for iv in stable:
+        if iv.start_ms <= ms <= iv.end_ms:
+            return ms
+    onset = _find_stable_speech_onset_after(stable, ms, min(max_shift, window_ms))
+    if onset is not None and onset - ms >= min_gap:
+        return onset + padding_ms
+    return ms
+
+
+def _find_stable_speech_onset_after(
+    intervals: list[_SpeechInterval], ms: int, max_shift: int
+) -> int | None:
+    # intervals is sorted by start_ms; first match is the nearest onset after ms.
+    for iv in intervals:
+        if iv.start_ms >= ms and iv.start_ms - ms <= max_shift:
+            return iv.start_ms
+    return None
 
 
 def _snap_end(ms: int, intervals: list[_SpeechInterval], window_ms: int, padding_ms: int, total_ms: int) -> int:

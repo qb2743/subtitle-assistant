@@ -88,6 +88,19 @@ def test_shared_boundary_pushes_next_start_to_speech_onset(tmp_path):
     assert snapped.segments[1].start_time == 760
 
 
+def test_snap_start_pushes_silent_start_to_stable_onset_plus_padding(tmp_path):
+    # Start sits in silence 150ms before real speech; a 60ms noise island nearby
+    # must NOT be used. Start should move forward to onset + padding_ms.
+    wav = tmp_path / "speech.wav"
+    _write_wav(wav, [(300, 360), (500, 1000)], total_ms=1100)
+    asr = ASRData([ASRDataSeg("word", 350, 1020)])
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=40)
+
+    # 60ms island (300-360) is below min_run=100, so onset gate skips it and
+    # lands on the 500ms stable onset. +40ms safety delay from padding_ms.
+    assert snapped.segments[0].start_time == 540
+
 
     wav = tmp_path / "speech.wav"
     _write_test_wav(wav)

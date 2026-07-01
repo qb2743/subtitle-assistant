@@ -151,10 +151,10 @@ class TextMatchingConfig:
     language: str = ""
     smart_split: bool = True
     snap_audio_boundaries: bool = True
-    # TEMP debug: write a .debug.json beside the output SRT recording per-segment
-    # ASR/DTW/snap timestamps so a mis-aligned subtitle can be diagnosed. Remove
-    # once alignment tuning settles.
-    debug_dump: bool = True
+    # Write a .debug.json beside the output SRT recording per-segment
+    # ASR/DTW/snap timestamps so a mis-aligned subtitle can be diagnosed. Off by
+    # default; set True to investigate a specific misalignment.
+    debug_dump: bool = False
     # Full ASR config; if omitted, a FasterWhisper default is used. The caller
     # typically supplies this (with the chosen engine, model dir, api key, ...).
     transcribe_config: Optional[TranscribeConfig] = None

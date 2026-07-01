@@ -130,6 +130,158 @@ def test_snap_start_pushes_silent_start_to_stable_onset_plus_padding(tmp_path):
     assert snapped.segments[0].start_time == 360
 
 
+def test_end_does_not_overlap_next_start_when_snap_pads_past_boundary(tmp_path):
+    # _snap_end can pad an end onto the next word's speech island, crossing the
+    # following subtitle's start. The final clamp must cut it back so lines abut
+    # and never cover the next line's first word.
+    wav = tmp_path / "speech.wav"
+    # Word A 100-400, word B (next line) 460-540, word C 700-900.
+    _write_wav(wav, [(100, 400), (460, 540), (700, 900)], total_ms=1000)
+    asr = ASRData(
+        [
+            ASRDataSeg("line one", 100, 420),   # end nudged past 460 by snap padding
+            ASRDataSeg("line two", 460, 900),
+        ]
+    )
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=120, padding_ms=60)
+
+    assert snapped.segments[0].end_time <= snapped.segments[1].start_time
+
+
+def test_refine_in_speech_does_not_backtrack_before_ms(tmp_path):
+    # ms sits near the END of a stable island that spans a word boundary (e.g.
+    # "complex" tail sharing an RMS island with a weak following "that"). The
+    # in-speech refine must NOT snap to an earlier onset in the island — that
+    # earlier onset is the previous word's tail consonant, and snapping to it
+    # shows this subtitle early. Refine searches forward only; with no onset
+    # at/after ms within the island, it keeps ms.
+    import math
+    wav = tmp_path / "speech.wav"
+    sample_rate = 16000
+    # One long island 400-940ms; ms=900 sits at its tail.
+    samples = []
+    s, e = 400, 940
+    while len(samples) < s * (sample_rate // 1000):
+        samples.append(0)
+    while len(samples) < e * (sample_rate // 1000):
+        t = len(samples) / sample_rate
+        samples.append(int(12000 * math.sin(2 * math.pi * 220 * t)))
+    while len(samples) < 1100 * (sample_rate // 1000):
+        samples.append(0)
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    asr = ASRData([ASRDataSeg("that", 900, 1100)])
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=0)
+
+    # Start stays at 900 (ms), not backtracked to an earlier onset in the island.
+    assert snapped.segments[0].start_time >= 900
+
+
+def test_snap_start_ordinary_window_does_not_jump_short_real_word(tmp_path):
+    # Ordinary window search (not the bridge) must not skip a real short word. ms
+    # sits in a gap; within the 300ms window there is a short real word (80-100ms,
+    # non-stable but flatness-confirmed) AND a further stable island. The search
+    # must stop at the short word, not jump past it to the stable island. The old
+    # stable-only search jumped it; the unified _find_next_speech_onset fixes it.
+    import math
+    wav = tmp_path / "speech.wav"
+    sample_rate = 16000
+    # prev stable 800-940, short word 1050-1130 (80ms), stable 1250-1500.
+    regions = [(800, 940), (1050, 1130), (1250, 1500)]
+    samples = []
+    for s, e in regions:
+        while len(samples) < s * (sample_rate // 1000):
+            samples.append(0)
+        while len(samples) < e * (sample_rate // 1000):
+            t = len(samples) / sample_rate
+            samples.append(int(12000 * math.sin(2 * math.pi * 220 * t)))
+    while len(samples) < 1600 * (sample_rate // 1000):
+        samples.append(0)
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    # ms=1000, window_ms=300 covers both 1050 and 1250.
+    asr = ASRData([ASRDataSeg("shortword then stable", 1000, 1500)])
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=0)
+
+    # Start lands at the short word (~1050), not the far stable (~1250). The old
+    # stable-only L235 would have pulled it to 1250, jumping the short word.
+    assert 1000 <= snapped.segments[0].start_time <= 1150
+
+
+def test_snap_start_bridges_collapsed_pause_to_next_onset(tmp_path):
+    # Whisper lays word timestamps end-to-end, collapsing inter-word pauses to
+    # zero gap, so an ASR start can land in the silence well before the real
+    # articulation. Here the start (500) sits 500ms before the next onset (1000)
+    # — beyond the old 300ms forward window. The reach extension bridges it.
+    wav = tmp_path / "speech.wav"
+    _write_wav(wav, [(100, 400), (1000, 1400)], total_ms=1500)
+    asr = ASRData([ASRDataSeg("against the twisted complexity", 500, 1400)])
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=0)
+
+    # Start bridges the gap into the onset neighborhood. The refine backtracks
+    # from the RMS onset (1000) to the spectral onset (~860, STFT window lead),
+    # i.e. the real articulation — so the result lands in [800, 1000], not stuck
+    # at 500 in silence. window_ms=300 alone would have left it at 500.
+    assert 800 <= snapped.segments[0].start_time <= 1000
+
+
+def test_snap_start_bridge_does_not_jump_short_real_words(tmp_path):
+    # Collapsed pause after a stable "behind"; the next phrase begins with a short
+    # real word "to" (RMS island <min_run=100ms but >=min_speech_ms=80ms). The
+    # bridge must stop at "to", not jump over it to a later stable island. The
+    # old stable-only bridge jumped to the far stable island (~840ms); the fix
+    # searches all islands and flatness-confirms the short real word.
+    import math
+    wav = tmp_path / "speech.wav"
+    sample_rate = 16000  # real-audio rate so the STFT window (25ms) fits inside
+    # the 80ms short word — a tonal frame fully inside the word has low flatness.
+    regions = [(360, 470), (540, 620), (850, 1000)]
+    total_ms = 1100
+    samples = []
+    for s, e in regions:
+        while len(samples) < s * (sample_rate // 1000):
+            samples.append(0)
+        while len(samples) < e * (sample_rate // 1000):
+            t = len(samples) / sample_rate
+            samples.append(int(12000 * math.sin(2 * math.pi * 220 * t)))
+    while len(samples) < total_ms * (sample_rate // 1000):
+        samples.append(0)
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    # ms=490 sits in the gap after "behind", before "to".
+    asr = ASRData([ASRDataSeg("to keep it from getting stuck", 490, 1000)])
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=0)
+
+    # Start lands at "to" (~540), not the far "stuck" (~840). The old stable-only
+    # bridge would have pulled it to ~840 (840-490=350 <= 1500 reach).
+    assert snapped.segments[0].start_time <= 600
+
+
+def test_snap_start_does_not_bridge_when_already_on_short_word(tmp_path):
+    # A short word (e.g. "But", 40ms) forms an island below min_run=100, so the
+    # stable filter drops it. The ASR start sits inside that short island — there
+    # IS speech here, the start is already on the right word. The collapsed-pause
+    # bridge must NOT fire and pull the start forward to a later stable island
+    # (e.g. "they" 500ms later); it stays put.
+    wav = tmp_path / "speech.wav"
+    # "But" island 660-740 (80ms, below min_run), "they" island 1140-1400 (stable).
+    _write_wav(wav, [(660, 740), (1140, 1400)], total_ms=1500)
+    asr = ASRData([ASRDataSeg("But for the three survivors", 700, 1400)])
+
+    snapped = snap_subtitles_to_audio_boundaries(asr, str(wav), window_ms=300, padding_ms=0)
+
+    # Start stays at 700 (on the "But" island), not bridged to ~1140.
+    assert snapped.segments[0].start_time == 700
+
+
 def test_refine_onset_backtracks_to_first_flux_hfc_onset():
     from videocaptioner.core.alignment.audio_boundary_snapper import (
         _SpeechInterval,

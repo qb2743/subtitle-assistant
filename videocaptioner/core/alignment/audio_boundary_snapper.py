@@ -77,6 +77,13 @@ def snap_subtitles_to_audio_boundaries(
         snapped, list(asr_data.segments), rms_values, intervals, frame_ms, window_ms, padding_ms
     )
     _fill_gaps_to_next_start(snapped)
+    # Final guard: _snap_end's padding can pull an end past the next subtitle's
+    # start (it snapped onto the next word's speech island without knowing the
+    # boundary), covering the start of the following line. Clamp any end that
+    # crossed its successor's start back to it — abutting, never overlapping.
+    for i in range(len(snapped) - 1):
+        if snapped[i].end_time > snapped[i + 1].start_time:
+            snapped[i].end_time = snapped[i + 1].start_time
     return ASRData(snapped)
 
 
@@ -212,9 +219,36 @@ def _snap_start(
             # so the subtitle starts at the actual articulation, not wherever
             # the ASR/DTW estimate landed (often mid-consonant or mid-vowel).
             return _refine_to_nearest_onset(flux_values, hfc_values, frame_ms, ms, iv)
-    onset = _find_stable_speech_onset_after(stable, ms, min(max_shift, window_ms))
+    # ms is in a silence gap (the loop above returned for in-speech starts).
+    # First try the caller's window — a small window means "snap only if speech
+    # is very near". If that misses, check whether ms sits right after a speech
+    # interval: Whisper lays word timestamps end-to-end with no gaps, so an ASR
+    # start can land in a collapsed inter-word pause well before the real next
+    # articulation. Only then bridge up to ~1.5s to reach the actual next vowel;
+    # a start with no preceding speech (e.g. lead-in silence) stays put, so a
+    # small window_ms never triggers a long-range pull.
+    # But if ms already sits in ANY speech island (including short <min_run
+    # ones the stable filter dropped — e.g. a 40ms "But"), there is speech here
+    # and the ASR start is already on it; do NOT bridge past it to a far island.
+    if any(iv.start_ms <= ms <= iv.end_ms for iv in intervals):
+        return ms
+    # Ordinary window search uses the same all-islands logic as the bridge below
+    # (stable trusted outright, short islands flatness-confirmed), so a real short
+    # word just after ms isn't jumped past to a further stable island.
+    onset = _find_next_speech_onset(
+        intervals, flatness_values, frame_ms, ms, min(max_shift, window_ms), min_run
+    )
+    if onset is None and _immediately_preceded_by_speech(stable, ms, frame_ms):
+        # Bridge searches ALL speech islands, not just stable ones: a collapsed
+        # pause can hide a sequence of short real words ("to keep it") whose RMS
+        # islands are <min_run. Searching stable-only would jump them and land on
+        # a later island, skipping audible speech. Short islands are flatness-
+        # confirmed so noise in the gap doesn't block the bridge.
+        onset = _find_next_speech_onset(
+            intervals, flatness_values, frame_ms, ms, max(max_shift, 1500), min_run
+        )
     if onset is not None and onset - ms >= min_gap:
-        iv = next((i for i in stable if i.start_ms == onset), None)
+        iv = next((i for i in intervals if i.start_ms == onset), None)
         # Borderline-length islands (just over min_run) might still be a breath
         # or plosive burst. Confirm with spectral flatness: real speech has
         # formant structure (low flatness), noise bursts are flat (high).
@@ -235,9 +269,11 @@ def _refine_to_nearest_onset(
     flux_values: list[float], hfc_values: list[float], frame_ms: int, ms: int, iv: _SpeechInterval
 ) -> int:
     # When the estimate is already inside a speech interval, snap to the nearest
-    # flux/HFC onset within the interval — the actual syllable boundary — rather
-    # than sitting mid-phone. Prefer the onset at or just before ms (the listener
-    # already hears the syllable), falling back to ms if none found nearby.
+    # flux/HFC onset at or AFTER ms within the interval — the actual syllable
+    # boundary of the word starting here. Never backtrack before ms: ms is the ASR
+    # word start, and an onset earlier in the same island is usually the tail of
+    # the PREVIOUS word (e.g. the [ks] of "complex" sharing an RMS island with a
+    # weakly-articulated following "that"), which would show this subtitle early.
     if not flux_values and not hfc_values:
         return ms
     lo = max(0, iv.start_ms // frame_ms)
@@ -251,11 +287,10 @@ def _refine_to_nearest_onset(
     threshold = strengths[len(strengths) // 2] * 1.5 if strengths else 0
     if threshold <= 0:
         return ms
-    # Search outward from cur for the nearest onset frame.
-    for delta in range(0, max(cur - lo, hi - cur) + 1):
-        for idx in (cur - delta, cur + delta):
-            if lo <= idx <= hi and idx < len(flux_values) and max(flux_values[idx], hfc_values[idx]) >= threshold:
-                return idx * frame_ms
+    # Search forward from cur for the nearest onset at/after ms.
+    for idx in range(cur, hi + 1):
+        if idx < len(flux_values) and max(flux_values[idx], hfc_values[idx]) >= threshold:
+            return idx * frame_ms
     return ms
 
 
@@ -307,14 +342,40 @@ def _flatness_confirms_speech(flatness_values: list[float], frame_ms: int, onset
     return flatness_values[idx] < 0.5
 
 
-def _find_stable_speech_onset_after(
-    intervals: list[_SpeechInterval], ms: int, max_shift: int
+def _find_next_speech_onset(
+    intervals: list[_SpeechInterval], flatness_values: list[float], frame_ms: int,
+    ms: int, max_shift: int, min_run: int,
 ) -> int | None:
-    # intervals is sorted by start_ms; first match is the nearest onset after ms.
+    # First REAL speech onset at/after ms within max_shift, used by the collapsed-
+    # pause bridge. Stable islands (>=min_run) are trusted outright; a short
+    # island (<min_run) is trusted only if flatness confirms tonal speech, so a
+    # short noise burst sitting in the gap doesn't block the bridge from reaching
+    # real speech further on — and a real short word (e.g. "to"/"keep") isn't
+    # jumped past to a later stable island. intervals is sorted by start_ms.
     for iv in intervals:
-        if iv.start_ms >= ms and iv.start_ms - ms <= max_shift:
+        if iv.start_ms < ms:
+            continue
+        if iv.start_ms - ms > max_shift:
+            break
+        if iv.end_ms - iv.start_ms >= min_run:
+            return iv.start_ms
+        if _flatness_confirms_speech(flatness_values, frame_ms, iv.start_ms):
             return iv.start_ms
     return None
+
+
+def _immediately_preceded_by_speech(
+    intervals: list[_SpeechInterval], ms: int, frame_ms: int, max_gap: int = 400
+) -> bool:
+    # True when one of the given intervals ends just before ``ms`` — the signature
+    # of a Whisper collapsed inter-word pause (word timestamps abut, so the ASR
+    # start sits in the silence right after the previous word). The caller passes
+    # the stable islands so a lead-in start (no preceding stable speech) doesn't
+    # trigger the long-range bridge.
+    for iv in intervals:
+        if iv.end_ms <= ms and ms - iv.end_ms <= max_gap:
+            return True
+    return False
 
 
 def _snap_end(ms: int, intervals: list[_SpeechInterval], window_ms: int, padding_ms: int, total_ms: int) -> int:
@@ -453,7 +514,8 @@ def _onset_strength_frames(samples: list[float], sample_rate: int, frame_ms: int
 
 
 def _detect_speech_intervals(
-    rms_values: list[float], frame_ms: int = 20, min_speech_ms: int = 80
+    rms_values: list[float], frame_ms: int = 20, min_speech_ms: int = 80,
+    merge_gap_ms: int = 80,
 ) -> list[_SpeechInterval]:
     if not rms_values:
         return []
@@ -465,21 +527,36 @@ def _detect_speech_intervals(
     if threshold <= 0:
         return []
 
-    intervals: list[_SpeechInterval] = []
+    # Raw runs of frames over threshold. Kept even when shorter than
+    # min_speech_ms so a weakly-articulated short word — whose energy dips below
+    # threshold mid-word (e.g. a soft "It's" whose sibilant/frame energy
+    # flickers) and gets chopped into sub-80ms fragments — can be reassembled
+    # with its siblings across the tiny intra-word dips before the length filter
+    # discards it. Inter-word pauses are far longer than merge_gap_ms so distinct
+    # words stay separate.
+    raw: list[_SpeechInterval] = []
     start: int | None = None
     for idx, value in enumerate(rms_values):
         if value >= threshold and start is None:
             start = idx * frame_ms
         elif value < threshold and start is not None:
-            end = idx * frame_ms
-            if end - start >= min_speech_ms:
-                intervals.append(_SpeechInterval(start, end))
+            raw.append(_SpeechInterval(start, idx * frame_ms))
             start = None
     if start is not None:
-        end = len(rms_values) * frame_ms
-        if end - start >= min_speech_ms:
-            intervals.append(_SpeechInterval(start, end))
-    return intervals
+        raw.append(_SpeechInterval(start, len(rms_values) * frame_ms))
+
+    if not raw:
+        return []
+
+    merged: list[_SpeechInterval] = [raw[0]]
+    for iv in raw[1:]:
+        prev = merged[-1]
+        if iv.start_ms - prev.end_ms <= merge_gap_ms:
+            merged[-1] = _SpeechInterval(prev.start_ms, iv.end_ms)
+        else:
+            merged.append(iv)
+
+    return [iv for iv in merged if iv.end_ms - iv.start_ms >= min_speech_ms]
 
 
 def _diagnose_onsets(audio_path: str) -> None:

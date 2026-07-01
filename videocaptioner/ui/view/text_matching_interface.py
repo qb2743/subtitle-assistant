@@ -279,6 +279,7 @@ class TextMatchingInterface(QWidget):
         self.setObjectName("TextMatchingInterface")
         self.setStyleSheet(TRANSCRIPTION_PAGE_QSS)
         self.worker_thread = None
+        self._running = False
         self.setup_ui()
 
     def setup_ui(self):
@@ -389,19 +390,22 @@ class TextMatchingInterface(QWidget):
         param_layout.addStretch()
         left_layout.addWidget(param_card)
 
-        # 开始按钮
+        # 开始/取消按钮
         self.start_btn = PrimaryPushButton(FIF.PLAY, "开始匹配", self)
         self.start_btn.setFixedHeight(40)
-        self.start_btn.clicked.connect(self._start_matching)
+        self.start_btn.clicked.connect(self._on_start_or_cancel)
         left_layout.addWidget(self.start_btn)
 
-        # 进度显示
+        # 进度显示（始终占位，避免窗口高度变化）
         self.progress_bar = ProgressBar(self)
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setValue(0)
         left_layout.addWidget(self.progress_bar)
 
         self.status_label = BodyLabel("", self)
-        self.status_label.setVisible(False)
+        self.status_label.setFixedHeight(20)
         left_layout.addWidget(self.status_label)
 
         left_layout.addStretch()
@@ -452,6 +456,28 @@ class TextMatchingInterface(QWidget):
         cfg.set(cfg.transcribe_model, model)
         cfg.save()
 
+    def _on_start_or_cancel(self):
+        """开始按钮在「开始」/「取消」之间切换。"""
+        if self._running:
+            self._cancel_matching()
+        else:
+            self._start_matching()
+
+    def _cancel_matching(self):
+        """取消进行中的匹配：立即释放 UI，后台 ASR 自行跑完、结果丢弃。"""
+        if self.worker_thread is not None:
+            self.worker_thread.cancel()
+        self._running = False
+        self._reset_start_button()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("已取消")
+
+    def _reset_start_button(self):
+        """按钮恢复为「开始匹配」。"""
+        self.start_btn.setIcon(FIF.PLAY)
+        self.start_btn.setText("开始匹配")
+        self.start_btn.setEnabled(True)
+
     def _start_matching(self):
         """开始匹配"""
         # 参数校验
@@ -477,11 +503,11 @@ class TextMatchingInterface(QWidget):
             )
             return
 
-        # 禁用控件
-        self.start_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
+        # 切换为取消态
+        self._running = True
+        self.start_btn.setIcon(FIF.CANCEL)
+        self.start_btn.setText("取消匹配")
         self.progress_bar.setValue(0)
-        self.status_label.setVisible(True)
         self.status_label.setText("准备中...")
 
         # 创建工作线程
@@ -506,14 +532,19 @@ class TextMatchingInterface(QWidget):
 
     def _on_progress(self, percent: int, message: str):
         """进度更新"""
+        if not self._running:
+            return
         self.progress_bar.setValue(percent)
         self.status_label.setText(message)
 
     def _on_error(self, error_msg: str):
         """处理错误"""
-        self.start_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.status_label.setVisible(False)
+        if not self._running:
+            return
+        self._running = False
+        self._reset_start_button()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("")
 
         InfoBar.error(
             title="匹配失败",
@@ -525,7 +556,10 @@ class TextMatchingInterface(QWidget):
 
     def _on_finished(self, output_path: str):
         """匹配完成"""
-        self.start_btn.setEnabled(True)
+        if not self._running:
+            return
+        self._running = False
+        self._reset_start_button()
         self.progress_bar.setValue(100)
         self.status_label.setText("匹配完成！")
 

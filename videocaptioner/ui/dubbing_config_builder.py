@@ -42,6 +42,12 @@ def resolve_dubbing_voice(provider: str, voice: str) -> str:
         if voice.endswith("Neural"):
             return ""
         return voice
+    if provider == "fishaudio":
+        # Fish Audio 音色 = reference_id（model _id），直接透传；空则由
+        # Fish 回退到 base model 默认音色。
+        if voice.endswith("Neural"):
+            return ""
+        return voice
     return voice
 
 
@@ -53,6 +59,7 @@ _VALID_PROVIDERS = (
     "dots",
     "voxcpm",
     "openai",
+    "fishaudio",
 )
 
 _DEFAULT_ELEVENLABS_MODEL = "eleven_flash_v2_5"
@@ -60,6 +67,21 @@ _DEFAULT_SILICONFLOW_BASE = "https://api.siliconflow.cn/v1"
 _DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _DEFAULT_SILICONFLOW_MODEL = "FunAudioLLM/CosyVoice2-0.5B"
 _DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-tts-preview"
+_DEFAULT_FISHAUDIO_BASE = "https://api.fish.audio"
+_DEFAULT_FISHAUDIO_MODEL = "s2.1-pro"
+
+_DUBBING_API_KEY_ATTRS = {
+    "elevenlabs": "dubbing_api_key_elevenlabs",
+    "siliconflow": "dubbing_api_key_siliconflow",
+    "openai": "dubbing_api_key_openai",
+    "gemini": "dubbing_api_key_gemini",
+    "fishaudio": "dubbing_api_key_fishaudio",
+}
+
+
+def dubbing_api_key_attr(provider: str) -> str:
+    """该 provider 在 cfg 上对应的 API Key 属性名；无独立字段回退到旧的 dubbing_api_key。"""
+    return _DUBBING_API_KEY_ATTRS.get(provider, "dubbing_api_key")
 
 
 def _resolve_timing() -> tuple[FitMode, float]:
@@ -142,6 +164,12 @@ def _provider_defaults(provider: str) -> tuple[str, str]:
         return model, api_base
     if provider == "edge":
         return model or "edge-tts", ""
+    if provider == "fishaudio":
+        if not model:
+            model = _DEFAULT_FISHAUDIO_MODEL
+        if not api_base:
+            api_base = _DEFAULT_FISHAUDIO_BASE
+        return model, api_base
     if provider == "dots":
         return "dots-tts", (cfg.dubbing_dots_url.value or "http://127.0.0.1:7860").strip()
     if provider == "voxcpm":
@@ -156,7 +184,7 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         provider = "edge"
 
     model, base_url = _provider_defaults(provider)
-    api_key = cfg.dubbing_api_key.value or ""
+    api_key = getattr(cfg, dubbing_api_key_attr(provider)).value or ""
 
     raw_voice = cfg.dubbing_voice.value or ""
     voice = resolve_dubbing_voice(provider, raw_voice)
@@ -176,6 +204,9 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         clone_audio_text = (cfg.dubbing_clone_audio_text.value or "").strip()
     elif provider == "voxcpm":
         local_start_script = (cfg.dubbing_voxcpm_start_script.value or "").strip()
+        clone_audio_path = (cfg.dubbing_clone_audio_path.value or "").strip()
+        clone_audio_text = (cfg.dubbing_clone_audio_text.value or "").strip()
+    elif provider == "fishaudio":
         clone_audio_path = (cfg.dubbing_clone_audio_path.value or "").strip()
         clone_audio_text = (cfg.dubbing_clone_audio_text.value or "").strip()
 

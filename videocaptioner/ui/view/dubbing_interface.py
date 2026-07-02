@@ -58,7 +58,9 @@ from videocaptioner.core.tts.local_tts_defaults import (
 )
 from videocaptioner.core.voices.loader import get_all_languages, get_voices_by_language
 from videocaptioner.ui.components.ApiKeysEditorDialog import ApiKeysEditorDialog
+from videocaptioner.ui.components.VoicePresetManagerDialog import VoicePresetManagerDialog
 from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.dubbing_config_builder import dubbing_api_key_attr
 from videocaptioner.ui.task_factory import resolve_dubbing_voice
 from videocaptioner.ui.thread.dubbing_interface_thread import DubbingInterfaceThread
 from videocaptioner.ui.thread.file_download_thread import Aria2Downloader, RequestsDownloader
@@ -296,6 +298,7 @@ class DubbingInterface(QWidget):
             "gemini - Gemini",
             "siliconflow - SiliconFlow",
             "openai - OpenAI TTS",
+            "fishaudio - Fish Audio",
             "dots - Dots-TTS (本地)",
             "voxcpm - VoxCPM (本地)",
         ])
@@ -381,9 +384,16 @@ class DubbingInterface(QWidget):
         self.preset_delete_btn.clicked.connect(self._delete_voice_preset)
         preset_layout.addWidget(self.preset_delete_btn)
         voice_layout.addLayout(preset_layout)
-        # 默认隐藏
+        # 默认隐藏（旧的内联预设控件，已被「管理音色」面板取代）
         for w in (self.preset_label, self.preset_combo, self.preset_save_btn, self.preset_delete_btn):
             w.setVisible(False)
+
+        # 音色管理按钮（Fish Audio / dots / voxcpm 共用）
+        self.manage_voices_btn = PushButton(FIF.MICROPHONE, "管理音色", self)
+        self.manage_voices_btn.setToolTip("打开音色管理面板，新建/编辑/试听/应用参考音色")
+        self.manage_voices_btn.clicked.connect(self._open_voice_manager)
+        voice_layout.addWidget(self.manage_voices_btn)
+        self.manage_voices_btn.setVisible(False)
 
         clone_audio_layout = QHBoxLayout()
         self.clone_audio_label = BodyLabel("参考音频:", self)
@@ -794,7 +804,7 @@ class DubbingInterface(QWidget):
             cfg.dubbing_voxcpm_start_script.value = self.start_script_edit.text().strip()
             cfg.dubbing_voxcpm_version.value = self.voxcpm_version_combo.currentText() or "v2"
             cfg.dubbing_model.value = "voxcpm"
-        if self._provider_id() == "elevenlabs":
+        if self._provider_id() in ("elevenlabs", "fishaudio"):
             model_text = self.model_combo.currentText()
             cfg.dubbing_model.value = (
                 model_text.split(" - ")[0] if " - " in model_text else model_text
@@ -803,12 +813,12 @@ class DubbingInterface(QWidget):
 
     def _primary_api_key(self) -> str:
         """用于测试/配额查询的第一个有效 Key。"""
-        keys = parse_api_keys(cfg.dubbing_api_key.value)
+        keys = parse_api_keys(getattr(cfg, dubbing_api_key_attr(self._provider_id())).value)
         return keys[0] if keys else ""
 
     def _sync_api_key_display(self):
         """根据配置刷新只读摘要行。"""
-        raw = cfg.dubbing_api_key.value or ""
+        raw = getattr(cfg, dubbing_api_key_attr(self._provider_id())).value or ""
         keys = parse_api_keys(raw)
         if not keys:
             self.api_key_edit.setText("")
@@ -825,9 +835,10 @@ class DubbingInterface(QWidget):
             )
 
     def _open_api_keys_dialog(self):
-        dialog = ApiKeysEditorDialog(cfg.dubbing_api_key.value, self)
+        key_attr = dubbing_api_key_attr(self._provider_id())
+        dialog = ApiKeysEditorDialog(getattr(cfg, key_attr).value, self)
         if dialog.exec():
-            cfg.dubbing_api_key.value = dialog.get_text()
+            getattr(cfg, key_attr).value = dialog.get_text()
             cfg.save()
             self._sync_api_key_display()
             self._schedule_quota_refresh()
@@ -983,6 +994,10 @@ class DubbingInterface(QWidget):
     def load_config(self):
         """从配置加载"""
         self._config_loading = True
+        # 一次性迁移：旧 dubbing_api_key（历史为 ElevenLabs 密钥）→ 独立的 elevenlabs 字段
+        if not (cfg.dubbing_api_key_elevenlabs.value or "").strip() and (cfg.dubbing_api_key.value or "").strip():
+            cfg.dubbing_api_key_elevenlabs.value = cfg.dubbing_api_key.value
+            cfg.save()
         # 加载 provider
         provider = cfg.dubbing_provider.value
         for i in range(self.provider_combo.count()):
@@ -1250,6 +1265,75 @@ class DubbingInterface(QWidget):
                     self.voice_combo.setCurrentIndex(i)
                     break
 
+        elif provider == "fishaudio":
+            # Fish Audio：云端 TTS + 可选参考音频克隆
+            self.lang_label.setVisible(False)
+            self.language_combo.setVisible(False)
+            self.voice_label.setVisible(True)
+            self.voice_combo.setVisible(True)
+            self.preview_btn.setVisible(True)
+            self.model_label.setVisible(True)
+            self.model_combo.setVisible(True)
+            self.quota_label.setVisible(False)
+            self.reset_date_label.setVisible(False)
+            self.hint_label.setText("💡 选择模型与音色；如需声音克隆，选「参考音频克隆」并填写上方参考音频/文本")
+            self.api_key_edit.setEnabled(False)
+            self.manage_keys_btn.setEnabled(True)
+            self.test_api_btn.setEnabled(True)
+            self.api_base_label.setVisible(True)
+            self.api_base_edit.setVisible(True)
+            if not self.api_base_edit.text():
+                self.api_base_edit.setText("https://api.fish.audio")
+
+            # 模型列表（Fish Audio s 系列，见 docs.fish.audio）
+            self.model_combo.blockSignals(True)
+            self.model_combo.clear()
+            self.model_combo.addItems([
+                "s2.1-pro - s2.1 Pro 高保真（推荐）",
+                "s2.1-pro-free - s2.1 Pro 免费版（开发测试）",
+                "s2-pro - s2 Pro（上一代）",
+                "s1 - s1（旧版，13 语种）",
+            ])
+            saved_model = (cfg.dubbing_model.value or "").strip() or "s2.1-pro"
+            for i in range(self.model_combo.count()):
+                if self.model_combo.itemText(i).startswith(saved_model):
+                    self.model_combo.setCurrentIndex(i)
+                    break
+            self.model_combo.blockSignals(False)
+
+            # 音色：官方预设始终可用 + 参考音频克隆（opt-in）+ 保存的自定义音色
+            from videocaptioner.core.dubbing.presets import FISHAUDIO_PRESET_VOICES
+            self.voice_combo.clear()
+            for name, rid in FISHAUDIO_PRESET_VOICES:
+                self.voice_combo.addItem(name, userData=rid)
+            self.voice_combo.addItem("参考音频克隆（需填上方参考音频）", userData="")
+            saved_voice = (cfg.dubbing_voice.value or "").strip()
+            preset_ids = {rid for _, rid in FISHAUDIO_PRESET_VOICES}
+            if saved_voice and saved_voice not in preset_ids:
+                self.voice_combo.addItem(saved_voice, userData=saved_voice)
+            target = saved_voice if saved_voice else self.voice_combo.itemData(0)
+            for i in range(self.voice_combo.count()):
+                if self.voice_combo.itemData(i) == target:
+                    self.voice_combo.setCurrentIndex(i)
+                    break
+
+            # 克隆控件可见（复用 dots/voxcpm 的控件，不显示本地服务部分）
+            self.clone_audio_label.setVisible(True)
+            self.clone_audio_edit.setVisible(True)
+            self.clone_btn.setVisible(True)
+            self.clone_summary.setVisible(True)
+            self.clone_text_label.setVisible(True)
+            self.clone_text_edit.setVisible(True)
+            self.clone_hint_label.setVisible(True)
+            self._refresh_clone_summary()
+            # 音色管理面板可见
+            self.manage_voices_btn.setVisible(True)
+            # 旧的内联预设控件保持隐藏（已被管理面板取代）
+            self.preset_label.setVisible(False)
+            self.preset_combo.setVisible(False)
+            self.preset_save_btn.setVisible(False)
+            self.preset_delete_btn.setVisible(False)
+
         elif provider in ("dots", "voxcpm"):
             self.lang_label.setVisible(False)
             self.language_combo.setVisible(False)
@@ -1288,6 +1372,7 @@ class DubbingInterface(QWidget):
             self.api_base_label.setVisible(False)
             self.api_base_edit.setVisible(False)
 
+        self._sync_api_key_display()
         self._persist_dubbing_settings()
 
     def _package_url_for_provider(self, provider: str) -> str:
@@ -1345,12 +1430,12 @@ class DubbingInterface(QWidget):
             self.clone_text_label,
             self.clone_text_edit,
             self.clone_hint_label,
-            self.preset_label,
-            self.preset_combo,
-            self.preset_save_btn,
-            self.preset_delete_btn,
+            self.manage_voices_btn,
         ):
             widget.setVisible(visible)
+        # 旧的内联预设控件保持隐藏（已被「管理音色」面板取代）
+        for w in (self.preset_label, self.preset_combo, self.preset_save_btn, self.preset_delete_btn):
+            w.setVisible(False)
         # 环境包 URL 仅 voxcpm 显示（dots 无官方整合包）
         show_pkg = visible and provider == "voxcpm"
         self.package_url_label.setVisible(show_pkg)
@@ -1360,7 +1445,6 @@ class DubbingInterface(QWidget):
         self.voxcpm_version_combo.setVisible(visible and provider == "voxcpm")
         if visible:
             self._refresh_clone_summary()
-            self._reload_preset_combo()
             self.launch_service_btn.setEnabled(True)
             self.launch_service_btn.setToolTip("启动本地 TTS 服务")
 
@@ -1390,7 +1474,11 @@ class DubbingInterface(QWidget):
         else:
             self.clone_summary.setText("未选择参考音频")
             self.clone_summary.setStyleSheet("color: #888; font-size: 12px;")
-        self.clone_hint_label.setText("Dots-TTS / VoxCPM 需要参考音频；建议 3-10 秒、发音清晰，并填写对应参考文本。")
+        # 提示文本按 provider 区分，避免 fishaudio 专属提示被 Dots/VoxCPM 文案覆盖
+        if self._provider_id() == "fishaudio":
+            self.clone_hint_label.setText("仅当选「参考音频克隆」音色时生效；首次会调用 /model 上传并缓存 reference_id")
+        else:
+            self.clone_hint_label.setText("Dots-TTS / VoxCPM 需要参考音频；建议 3-10 秒、发音清晰，并填写对应参考文本。")
 
     # -- 音色预设管理 --------------------------------------------------------
 
@@ -1497,6 +1585,38 @@ class DubbingInterface(QWidget):
         InfoBar.success(
             title="已删除",
             content=f"音色预设「{name}」已删除。",
+            duration=INFOBAR_DURATION_SUCCESS,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+
+    def _open_voice_manager(self):
+        """打开音色管理面板。应用某条音色后回填参考音频/文本。"""
+        provider = self._provider_id()
+        dlg = VoicePresetManagerDialog(
+            presets_file=self._PRESETS_FILE,
+            current_provider=provider,
+            parent=self,
+        )
+        dlg.applied.connect(self._apply_voice_from_manager)
+        dlg.exec_()
+        # 关闭面板后，旧的内联预设下拉同步刷新（若可见）
+        self._reload_preset_combo()
+
+    def _apply_voice_from_manager(self, audio_path: str, audio_text: str):
+        """从音色管理面板应用一条音色：回填参考音频与参考文本。"""
+        self.clone_audio_edit.setText(audio_path)
+        self.clone_text_edit.setPlainText(audio_text)
+        # Fish Audio：切到「参考音频克隆」音色项，让克隆生效
+        if self._provider_id() == "fishaudio":
+            for i in range(self.voice_combo.count()):
+                if (self.voice_combo.itemData(i) or "") == "":
+                    self.voice_combo.setCurrentIndex(i)
+                    break
+        self._refresh_clone_summary()
+        InfoBar.success(
+            title="已应用音色",
+            content=f"参考音频已设置为 {Path(audio_path).name}，可开始配音。",
             duration=INFOBAR_DURATION_SUCCESS,
             position=InfoBarPosition.TOP,
             parent=self,
@@ -1745,14 +1865,25 @@ class DubbingInterface(QWidget):
 
         # 否则，生成新的试听音频
         voice_id = self.voice_combo.currentData()
+        # voice_id 为空时：fishaudio 表示选了「参考音频克隆」，试听无法走克隆链路；
+        # 其他引擎表示尚未选择音色。
         if not voice_id:
-            InfoBar.warning(
-                title="请先选择音色",
-                content="请先选择一个音色后再试听",
-                duration=INFOBAR_DURATION_WARNING,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
+            if self._provider_id() == "fishaudio":
+                InfoBar.warning(
+                    title="克隆暂不支持试听",
+                    content="参考音频克隆需调用 /model 上传，试听无法走克隆链路，请直接配音试听效果。",
+                    duration=INFOBAR_DURATION_WARNING,
+                    position=InfoBarPosition.TOP,
+                    parent=self,
+                )
+            else:
+                InfoBar.warning(
+                    title="请先选择音色",
+                    content="请先选择一个音色后再试听",
+                    duration=INFOBAR_DURATION_WARNING,
+                    position=InfoBarPosition.TOP,
+                    parent=self,
+                )
             return
 
         # 获取当前 provider
@@ -1761,13 +1892,16 @@ class DubbingInterface(QWidget):
 
         # 获取 API Key（如果需要）
         api_key = self._primary_api_key() if provider != "edge" else None
-        api_base = self.api_base_edit.text().strip() if provider == "openai" else None
+        api_base = self.api_base_edit.text().strip() if provider in ("openai", "fishaudio") else None
 
-        # 获取 ElevenLabs 模型（如果是 ElevenLabs）
+        # 获取模型 ID（ElevenLabs / Fish Audio）
         model_id = None
         if provider == "elevenlabs":
             model_text = self.model_combo.currentText()
             model_id = model_text.split(" - ")[0] if " - " in model_text else "eleven_flash_v2_5"
+        elif provider == "fishaudio":
+            model_text = self.model_combo.currentText()
+            model_id = model_text.split(" - ")[0] if " - " in model_text else "s2.1-pro"
 
         # 禁用试听按钮
         self.preview_btn.setEnabled(False)
@@ -1887,6 +2021,9 @@ class DubbingInterface(QWidget):
         # 根据不同引擎测试
         if provider == "elevenlabs":
             self._test_elevenlabs_api(api_key)
+        elif provider == "fishaudio":
+            api_base = self.api_base_edit.text().strip() or "https://api.fish.audio"
+            self._test_fishaudio_api(api_key, api_base)
         else:
             self.test_api_btn.setEnabled(True)
             InfoBar.warning(
@@ -1905,12 +2042,29 @@ class DubbingInterface(QWidget):
         self.api_test_thread.error.connect(self._on_api_test_error)
         self.api_test_thread.start()
 
+    def _test_fishaudio_api(self, api_key: str, api_base: str):
+        """测试 Fish Audio API 并获取自有音色列表（GET /model?self=true）"""
+        self.api_test_thread = FishAudioAPITestThread(api_key, api_base)
+        self.api_test_thread.finished.connect(self._on_api_test_finished)
+        self.api_test_thread.error.connect(self._on_api_test_error)
+        self.api_test_thread.start()
+
     def _on_api_test_finished(self, voices: list):
         """API 测试成功"""
         self.test_api_btn.setEnabled(True)
 
+        provider = self._provider_id()
+
         # 清空音色列表
         self.voice_combo.clear()
+
+        # Fish Audio：官方预设始终可用 + 参考音频克隆（opt-in）；self=true 只返回账户自建音色
+        saved_voice = (cfg.dubbing_voice.value or "").strip() if provider == "fishaudio" else ""
+        if provider == "fishaudio":
+            from videocaptioner.core.dubbing.presets import FISHAUDIO_PRESET_VOICES
+            for name, rid in FISHAUDIO_PRESET_VOICES:
+                self.voice_combo.addItem(name, userData=rid)
+            self.voice_combo.addItem("参考音频克隆（需填上方参考音频）", userData="")
 
         # 加载音色
         for voice in voices:
@@ -1920,19 +2074,30 @@ class DubbingInterface(QWidget):
                 self.voice_combo.addItem(f"{name}", userData=voice_id)
 
         # 保存音色列表到缓存
-        provider_text = self.provider_combo.currentText()
-        provider = provider_text.split(" - ")[0].lower() if " - " in provider_text else provider_text.lower()
         self._save_voice_cache(provider, voices)
 
-        if self.voice_combo.count() > 0:
-            self.voice_combo.setCurrentIndex(0)
+        # 优先恢复保存的音色，否则回退到第一项（fishaudio 为默认音色）
+        target = saved_voice or (self.voice_combo.itemData(0) if self.voice_combo.count() else "")
+        for i in range(self.voice_combo.count()):
+            if self.voice_combo.itemData(i) == target:
+                self.voice_combo.setCurrentIndex(i)
+                break
+        else:
+            if self.voice_combo.count() > 0:
+                self.voice_combo.setCurrentIndex(0)
         self._persist_dubbing_settings()
 
-        self._query_elevenlabs_quota()
+        if provider == "elevenlabs":
+            self._query_elevenlabs_quota()
+
+        if provider == "fishaudio" and not voices:
+            content = "API 连接正常；账户暂无自定义音色，可使用上方官方预设或参考音频克隆"
+        else:
+            content = f"已获取 {len(voices)} 个音色"
 
         InfoBar.success(
             title="测试成功",
-            content=f"已获取 {len(voices)} 个音色",
+            content=content,
             duration=INFOBAR_DURATION_SUCCESS,
             position=InfoBarPosition.TOP,
             parent=self,
@@ -2031,7 +2196,7 @@ class DubbingInterface(QWidget):
         self.worker_thread.start()
 
     def _check_elevenlabs_quota_before_start(self, input_mode: str, input_data: str) -> bool:
-        if len(parse_api_keys(cfg.dubbing_api_key.value)) != 1:
+        if len(parse_api_keys(cfg.dubbing_api_key_elevenlabs.value)) != 1:
             return True
         quota = self.last_quota_info
         if not quota:
@@ -2251,6 +2416,54 @@ class ElevenLabsAPITestThread(QThread):
                 self.error.emit(f"测试失败: {error_msg}")
 
 
+class FishAudioAPITestThread(QThread):
+    """Fish Audio API 测试线程 - GET /model?self=true 获取自有音色列表"""
+
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, api_key: str, api_base: str = "https://api.fish.audio"):
+        super().__init__()
+        self.api_key = api_key
+        self.api_base = (api_base or "https://api.fish.audio").rstrip("/")
+
+    def run(self):
+        """测试 API 并获取音色列表"""
+        try:
+            import requests
+
+            response = requests.get(
+                f"{self.api_base}/model",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                params={"self": "true", "page_size": 100},
+                timeout=30,
+            )
+            if response.status_code == 401:
+                self.error.emit("API Key 无效，请检查后重试")
+                return
+            response.raise_for_status()
+            items = (response.json() or {}).get("items") or []
+            voices = []
+            for item in items:
+                voice_id = item.get("_id") or item.get("id")
+                if not voice_id:
+                    continue
+                title = item.get("title") or "未命名音色"
+                state = item.get("state", "")
+                # 仅训练完成的音色可直接用于合成；其它状态标注以免预览失败
+                name = title if state in ("trained", "", None) else f"{title}（{state}）"
+                voices.append({"name": name, "voice_id": voice_id})
+            self.finished.emit(voices)
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                self.error.emit("API Key 无效，请检查后重试")
+            elif "403" in error_msg or "Forbidden" in error_msg:
+                self.error.emit("API Key 没有权限")
+            else:
+                self.error.emit(f"测试失败: {error_msg}")
+
+
 class VoicePreviewThread(QThread):
     """音色试听线程 - 支持多种 TTS 引擎"""
 
@@ -2300,6 +2513,8 @@ class VoicePreviewThread(QThread):
                 self._generate_elevenlabs(text, output_file)
             elif self.provider == "openai":
                 self._generate_openai(text, output_file)
+            elif self.provider == "fishaudio":
+                self._generate_fishaudio(text, output_file)
             else:
                 self.error.emit(f"暂不支持 {self.provider} 引擎的试听功能")
                 return
@@ -2369,6 +2584,29 @@ class VoicePreviewThread(QThread):
         )
 
         response.stream_to_file(output_file)
+
+    def _generate_fishaudio(self, text: str, output_file: str):
+        """使用 Fish Audio 生成音频（复用 FishAudioSpeechSynthesizer，model 走 header）"""
+        if not self.api_key:
+            raise ValueError("Fish Audio 需要 API Key")
+
+        from videocaptioner.core.speech.providers import FishAudioSpeechSynthesizer
+        from videocaptioner.core.speech.models import SpeechProviderConfig, SynthesisRequest
+
+        config = SpeechProviderConfig(
+            provider="fishaudio",
+            api_key=self.api_key,
+            model=self.model_id or "s2.1-pro",
+            base_url=self.api_base or "https://api.fish.audio",
+            response_format="mp3",
+            speed=1.0,
+        )
+        synth = FishAudioSpeechSynthesizer(config)
+        synth.synthesize(SynthesisRequest(
+            text=text,
+            output_path=output_file,
+            voice=self.voice_id or None,
+        ))
 
 
 class ElevenLabsQuotaThread(QThread):

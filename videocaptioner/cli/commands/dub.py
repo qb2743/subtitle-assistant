@@ -179,7 +179,7 @@ def _resolve_dubbing_settings(config: dict) -> dict[str, str]:
 
 
 def _resolve_provider(value: str) -> DubbingProvider:
-    valid = ("siliconflow", "gemini", "edge", "elevenlabs", "dots", "voxcpm", "openai")
+    valid = ("siliconflow", "gemini", "edge", "elevenlabs", "dots", "voxcpm", "openai", "fishaudio")
     if value in valid:
         return value
     raise ValueError(f"Unsupported dubbing provider: {value}")

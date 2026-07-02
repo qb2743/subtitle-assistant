@@ -143,6 +143,12 @@ class Config(QConfig):
     deeplx_endpoint = ConfigItem("Translate", "DeeplxEndpoint", "")
     batch_size = RangeConfigItem("Translate", "BatchSize", 10, RangeValidator(5, 50))
     thread_num = RangeConfigItem("Translate", "ThreadNum", 10, RangeValidator(1, 50))
+    translation_mode = OptionsConfigItem(
+        "Translate",
+        "TranslationMode",
+        "auto",
+        OptionsValidator(["auto", "full_context", "chunked"]),
+    )
 
     # ------------------- 转录配置 -------------------
     transcribe_model = OptionsConfigItem(
@@ -260,6 +266,11 @@ class Config(QConfig):
         "Dubbing", "TtsWorkers", 5, RangeValidator(1, 16)
     )
     dubbing_api_key = ConfigItem("Dubbing", "ApiKey", "")
+    dubbing_api_key_elevenlabs = ConfigItem("Dubbing", "ApiKeyElevenLabs", "")
+    dubbing_api_key_siliconflow = ConfigItem("Dubbing", "ApiKeySiliconFlow", "")
+    dubbing_api_key_openai = ConfigItem("Dubbing", "ApiKeyOpenAI", "")
+    dubbing_api_key_gemini = ConfigItem("Dubbing", "ApiKeyGemini", "")
+    dubbing_api_key_fishaudio = ConfigItem("Dubbing", "ApiKeyFishAudio", "")
     dubbing_api_base = ConfigItem("Dubbing", "ApiBase", "https://api.openai.com/v1")
     dubbing_model = ConfigItem("Dubbing", "Model", "eleven_flash_v2_5")
     dubbing_clone_audio_path = ConfigItem("Dubbing", "CloneAudioPath", "")

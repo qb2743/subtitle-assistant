@@ -19,6 +19,7 @@ from videocaptioner.core.utils.cache import get_llm_cache, memoize
 from videocaptioner.core.utils.logger import setup_logger
 
 from .request_logger import create_logging_http_client, log_llm_response
+from .response_utils import extract_content_from_response, make_pseudo_completion
 
 _global_client: Optional[OpenAI] = None
 _client_lock = threading.Lock()
@@ -128,17 +129,46 @@ def call_llm(
     temperature: float = 1,
     **kwargs: Any,
 ) -> Any:
-    """Call LLM API with automatic caching."""
+    """Call LLM API with automatic caching.
+
+    兼容非标准 OpenAI 代理：当 SDK 解析出的标准 choices 为空时，
+    尝试从响应原始数据中提取 SSE 流式内容并构造伪 ChatCompletion。
+    """
     response = _call_llm_api(messages, model, temperature, **kwargs)
 
-    if not (
+    # 标准解析：choices[0].message.content 非空
+    if (
         response
         and hasattr(response, "choices")
         and response.choices
         and len(response.choices) > 0
         and hasattr(response.choices[0], "message")
+        and response.choices[0].message
         and response.choices[0].message.content
     ):
-        raise ValueError("Invalid OpenAI API response: empty choices or content")
+        return response
 
-    return response
+    # SSE fallback：某些代理在非流式请求下返回 SSE 流式数据，
+    # SDK 无法解析成标准 ChatCompletion，但原始数据里有内容。
+    content = extract_content_from_response(response)
+    if content:
+        logger.info(
+            f"Standard ChatCompletion parse failed, extracted content via SSE fallback "
+            f"({len(content)} chars)"
+        )
+        return make_pseudo_completion(content)
+
+    # 真正的空响应，抛错并附带诊断信息
+    try:
+        dump = response.model_dump() if hasattr(response, "model_dump") else str(response)
+        if not isinstance(dump, str):
+            import json as _json
+            dump = _json.dumps(dump, ensure_ascii=False, default=str)
+    except Exception:
+        dump = str(response)
+    logger.error(f"Invalid OpenAI API response: empty choices or content. Raw: {dump[:500]}")
+    raise ValueError(
+        f"Invalid OpenAI API response: empty choices or content. "
+        f"The endpoint returned 200 but no parseable completion. "
+        f"Raw response (truncated): {dump[:300]}"
+    )

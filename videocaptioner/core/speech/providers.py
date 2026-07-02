@@ -57,6 +57,8 @@ def create_speech_synthesizer(config: SpeechProviderConfig) -> SpeechSynthesizer
         return ElevenLabsSpeechSynthesizer(config)
     if config.provider == "openai":
         return OpenAISpeechSynthesizer(config)
+    if config.provider == "fishaudio":
+        return FishAudioSpeechSynthesizer(config)
     if config.provider in ("dots", "voxcpm"):
         from .local_tts import LocalGradioSpeechSynthesizer
 
@@ -227,6 +229,131 @@ class SiliconFlowSpeechSynthesizer:
         digest = hashlib.md5(audio_file.read_bytes()).hexdigest()
         raw = f"speech_voice:{self.config.model}:{digest}:{transcript}"
         return hashlib.md5(raw.encode()).hexdigest()
+
+
+class FishAudioSpeechSynthesizer:
+    """Fish Audio (s2.1-pro / s1) TTS synthesizer.
+
+    POST {base_url}/v1/tts with HTTP header ``model`` and JSON body
+    {text, reference_id, format, sample_rate, latency, prosody:{speed}}.
+    The ``model`` header is required even when ``reference_id`` is set.
+    Voice cloning uploads a reference audio via POST /model (multipart:
+    type=tts, title, train_mode, voices, texts, visibility) and reuses the
+    returned model ``_id`` as ``reference_id``.
+    """
+
+    DEFAULT_BASE_URL = "https://api.fish.audio"
+    DEFAULT_MODEL = "s2.1-pro"
+
+    def __init__(self, config: SpeechProviderConfig):
+        if not config.api_key:
+            raise ValueError("Fish Audio API key is required")
+        self.config = config
+        self.base_url = (config.base_url or self.DEFAULT_BASE_URL).rstrip("/")
+        self.cache = get_tts_cache()
+
+    def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        reference_id = self._resolve_reference_id(request)
+        payload: dict[str, Any] = {
+            "text": request.text.strip(),
+            "format": self.config.response_format,
+            "sample_rate": self.config.sample_rate,
+            "latency": self._extra("latency", "normal"),
+            "prosody": {"speed": float(self.config.speed)},
+        }
+        if reference_id:
+            payload["reference_id"] = reference_id
+        model = self.config.model or self.DEFAULT_MODEL
+        response = self._post_tts(payload, model)
+        fmt = self.config.response_format or "mp3"
+        path = Path(request.output_path).with_suffix(f".{fmt}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(response.content)
+        return SynthesisResult(
+            output_path=str(path),
+            voice=reference_id or model,
+            format=fmt,
+            provider_metadata={"content_type": response.headers.get("content-type", "")},
+        )
+
+    def _post_tts(self, payload: dict[str, Any], model: str) -> requests.Response:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "Content-Type": "application/json",
+                        "model": model,
+                    },
+                    json=payload,
+                    timeout=self.config.timeout,
+                )
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if not response.content:
+                    raise ValueError("Fish Audio TTS returned an empty audio body")
+                if "json" in content_type.lower():
+                    raise ValueError(f"Fish Audio TTS returned JSON instead of audio: {response.text[:300]}")
+                return response
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+        raise RuntimeError(f"Fish Audio TTS failed after retries: {last_error}")
+
+    def _resolve_reference_id(self, request: SynthesisRequest) -> str:
+        # Selected voice (default preset / account voice) wins — leftover clone
+        # fields from other providers (e.g. dots) must not hijack Fish Audio.
+        # Clone is opt-in: only when no voice is selected AND clone audio+text
+        # are both provided.
+        voice = request.voice or self.config.default_voice
+        if voice:
+            return voice
+        if request.clone_audio_path and request.clone_audio_text:
+            return self._upload_reference(request.clone_audio_path, request.clone_audio_text)
+        return ""
+
+    def _upload_reference(self, audio_path: str, transcript: str) -> str:
+        audio_file = Path(audio_path)
+        if not audio_file.exists():
+            raise FileNotFoundError(f"Voice clone reference audio not found: {audio_path}")
+        cache_key = self._voice_cache_key(audio_file, transcript)
+        cached = self.cache.get(cache_key)
+        if cached:
+            return str(cached)
+
+        title = f"videocaptioner_{hashlib.md5(cache_key.encode()).hexdigest()[:12]}"
+        with audio_file.open("rb") as f:
+            response = requests.post(
+                f"{self.base_url}/model",
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                data={
+                    "type": "tts",
+                    "title": title,
+                    "train_mode": "fast",
+                    "visibility": "unlist",
+                    "texts": transcript,
+                },
+                files={"voices": (audio_file.name, f, _guess_mime(audio_file))},
+                timeout=self.config.timeout,
+            )
+        response.raise_for_status()
+        model_id = response.json().get("_id")
+        if not model_id:
+            raise ValueError(f"Fish Audio upload did not return a model _id: {response.text}")
+        self.cache.set(cache_key, model_id, expire=86400 * 2)
+        return str(model_id)
+
+    def _voice_cache_key(self, audio_file: Path, transcript: str) -> str:
+        digest = hashlib.md5(audio_file.read_bytes()).hexdigest()
+        raw = f"fishaudio_voice:{self.config.model}:{digest}:{transcript}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def _extra(self, key: str, default):
+        value = self.config.extra.get(key)
+        return default if value is None else value
 
 
 class GeminiSpeechSynthesizer:

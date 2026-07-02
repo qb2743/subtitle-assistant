@@ -58,6 +58,7 @@ def create_translator_from_config(
         custom_prompt=custom_prompt,
         is_reflect=config.need_reflect,
         update_callback=callback,
+        translation_mode=config.translation_mode,
     )
 
 

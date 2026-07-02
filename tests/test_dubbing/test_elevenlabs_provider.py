@@ -271,7 +271,13 @@ def test_all_keys_fail_raises_clear_error(tmp_path, monkeypatch):
         )
 
 
-def test_non_retryable_error_does_not_rotate(tmp_path, monkeypatch):
+def test_non_auth_error_also_rotates_to_next_key(tmp_path, monkeypatch):
+    """Any failure (not just auth) rotates to the next key.
+
+    "出问题就换 API" -- a network/timeout/5xx error on one key must not burn
+    the whole dub; the next key is tried, and only when every key has failed
+    is an error raised.
+    """
     attempted: list[str] = []
 
     class _TTS:
@@ -289,12 +295,46 @@ def test_non_retryable_error_does_not_rotate(tmp_path, monkeypatch):
     monkeypatch.setattr(providers_module, "ElevenLabs", _Client)
 
     config = _make_config(api_key="k1, k2")
-    with pytest.raises(RuntimeError, match="ElevenLabs TTS failed: network boom"):
+    with pytest.raises(RuntimeError, match="All 2 ElevenLabs API keys failed"):
         ElevenLabsSpeechSynthesizer(config).synthesize(
             SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav"))
         )
-    # A non-auth error must not burn through the remaining keys.
-    assert attempted == ["k1"]
+    # Both keys are tried before giving up.
+    assert attempted == ["k1", "k2"]
+
+
+def test_non_auth_error_recovers_on_next_key(tmp_path, monkeypatch):
+    """A network/timeout error on the first key is recovered by the second.
+
+    This is the core "一个 api 出问题就换，配音不停" guarantee: a non-auth
+    failure on one key transparently falls through to a working key instead
+    of aborting the synthesis.
+    """
+    attempted: list[str] = []
+
+    class _TTS:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def convert(self, **kwargs):
+            attempted.append(self.api_key)
+            if self.api_key == "broken":
+                raise RuntimeError("connection reset")
+            return iter([b"recovered"])
+
+    class _Client:
+        def __init__(self, **kwargs) -> None:
+            self.text_to_speech = _TTS(kwargs.get("api_key"))
+
+    monkeypatch.setattr(providers_module, "ElevenLabs", _Client)
+
+    config = _make_config(api_key="broken, working")
+    result = ElevenLabsSpeechSynthesizer(config).synthesize(
+        SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav"))
+    )
+    assert attempted == ["broken", "working"]
+    assert Path(result.output_path).read_bytes() == b"recovered"
+    assert result.provider_metadata["api_key_index"] == 1
 
 
 def test_streaming_error_during_iteration_switches_key(tmp_path, monkeypatch):

@@ -450,8 +450,11 @@ class ElevenLabsSpeechSynthesizer:
     cloning from a reference audio is not supported by this provider.
 
     Multiple API keys may be supplied in ``config.api_key`` (comma/semicolon/
-    whitespace separated). Keys are used in round-robin order across calls;
-    on a quota or authorization failure the next key is tried automatically.
+    whitespace separated). Keys are used in round-robin order across calls.
+    On ANY failure (auth, quota, network, timeout, 5xx, empty body) the next
+    key is tried automatically so a single bad key never stops the dub; only
+    a 429 is retried on the same key with backoff. An exception is raised
+    only when every key has failed.
     """
 
     DEFAULT_MODEL = "eleven_multilingual_v2"
@@ -491,59 +494,56 @@ class ElevenLabsSpeechSynthesizer:
 
         keys_to_try = self._rotated_keys()
         last_error: Exception | None = None
-        attempted = 0
         for key_index, api_key in enumerate(keys_to_try):
-            attempted += 1
-            path = Path(request.output_path).with_suffix(".mp3")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            success = False
+            audio_bytes = b""
             for retry_index in range(3):
                 try:
-                    client = ElevenLabs(
-                        api_key=api_key,
-                        base_url=self.config.base_url or None,
-                        timeout=self.config.timeout,
-                        httpx_client=create_http_client(timeout=self.config.timeout),
+                    audio_bytes = self._convert_with_key(
+                        api_key, request, voice, model, voice_settings
                     )
-                    response = client.text_to_speech.convert(
-                        voice_id=voice,
-                        text=request.text.strip(),
-                        model_id=model,
-                        output_format=self.OUTPUT_FORMAT,
-                        apply_text_normalization="auto",
-                        voice_settings=voice_settings,
-                    )
-                    path.unlink(missing_ok=True)
-                    with path.open("wb") as f:
-                        for chunk in response:
-                            if chunk:
-                                f.write(chunk)
-                    success = True
+                    last_error = None
                     break
                 except Exception as exc:
                     last_error = exc
-                    path.unlink(missing_ok=True)
-                    if self._should_retry_same_key(exc) and retry_index < 2:
+                    # Only a 429 is worth retrying on the SAME key (with
+                    # backoff). Every other failure -- auth, quota, network,
+                    # timeout, 5xx, empty body -- switches to the next key
+                    # immediately so one bad key never stops the whole dub.
+                    if self._is_rate_limit(exc) and retry_index < 2:
                         delay = self._retry_delay(exc, retry_index)
-                        logger.warning("ElevenLabs rate limited; retrying in %.1fs", delay)
+                        logger.warning(
+                            "ElevenLabs rate limited on key %d/%d; retrying in %.1fs",
+                            key_index + 1,
+                            len(keys_to_try),
+                            delay,
+                        )
                         time.sleep(delay)
                         continue
-                    logger.warning(
-                        "ElevenLabs API key %d/%d failed: %s",
-                        key_index + 1,
-                        len(keys_to_try),
-                        exc,
-                    )
-                    break
+                    break  # non-retryable -> give up on this key, try next
 
-            if not success:
-                if key_index < len(keys_to_try) - 1 and self._should_try_next_key(last_error):
-                    continue
-                break
+            if last_error is not None:
+                logger.warning(
+                    "ElevenLabs API key %d/%d failed: %s; switching to next key",
+                    key_index + 1,
+                    len(keys_to_try),
+                    last_error,
+                )
+                continue
 
-            if not path.exists() or path.stat().st_size <= 0:
-                raise ValueError("ElevenLabs TTS returned an empty audio file")
+            if not audio_bytes:
+                last_error = ValueError("ElevenLabs TTS returned an empty audio file")
+                logger.warning(
+                    "ElevenLabs API key %d/%d returned empty audio; switching to next key",
+                    key_index + 1,
+                    len(keys_to_try),
+                )
+                continue
 
+            path = Path(request.output_path).with_suffix(".mp3")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.unlink(missing_ok=True)
+            with path.open("wb") as f:
+                f.write(audio_bytes)
             return SynthesisResult(
                 output_path=str(path),
                 voice=voice,
@@ -560,12 +560,47 @@ class ElevenLabsSpeechSynthesizer:
                 },
             )
 
-        if attempted > 1:
+        if len(keys_to_try) > 1:
             raise RuntimeError(
-                f"All {attempted} ElevenLabs API keys failed; last error: "
+                f"All {len(keys_to_try)} ElevenLabs API keys failed; last error: "
                 f"{self._friendly_error(last_error)}"
             ) from last_error
         raise RuntimeError(self._friendly_error(last_error)) from last_error
+
+    def _convert_with_key(
+        self,
+        api_key: str,
+        request: SynthesisRequest,
+        voice: str,
+        model: str,
+        voice_settings,
+    ) -> bytes:
+        """Run one TTS conversion with ``api_key`` and return the audio bytes.
+
+        The streaming response is fully consumed inside this method so HTTP
+        errors raised during iteration (not just at ``convert()`` time)
+        propagate as exceptions to the caller's rotation logic. Collecting to
+        memory also avoids leaving half-written files on a mid-stream failure.
+        """
+        client = ElevenLabs(
+            api_key=api_key,
+            base_url=self.config.base_url or None,
+            timeout=self.config.timeout,
+            httpx_client=create_http_client(timeout=self.config.timeout),
+        )
+        response = client.text_to_speech.convert(
+            voice_id=voice,
+            text=request.text.strip(),
+            model_id=model,
+            output_format=self.OUTPUT_FORMAT,
+            apply_text_normalization="auto",
+            voice_settings=voice_settings,
+        )
+        chunks: list[bytes] = []
+        for chunk in response:
+            if chunk:
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     def _rotated_keys(self) -> list[str]:
         """Return the key list rotated by a thread-safe round-robin cursor.
@@ -582,20 +617,13 @@ class ElevenLabsSpeechSynthesizer:
             self._key_index += 1
         return keys[idx:] + keys[:idx]
 
-    def _should_try_next_key(self, error: Exception) -> bool:
-        """Whether a failure looks like a per-key quota/auth problem."""
-        if UnauthorizedError is not None and isinstance(error, UnauthorizedError):
-            return True
-        if ElevenLabsApiError is not None and isinstance(error, ElevenLabsApiError):
-            status = getattr(error, "status_code", None)
-            if status in (401, 402, 403, 404, 429):
-                return True
-            body = str(getattr(error, "body", "") or "").lower()
-            if body and any(word in body for word in ("quota", "rate", "limit", "unauthorized", "permission")):
-                return True
-        return False
+    def _is_rate_limit(self, error: Exception | None) -> bool:
+        """Whether ``error`` is a 429 worth retrying on the same key.
 
-    def _should_retry_same_key(self, error: Exception | None) -> bool:
+        Every other failure (auth, quota, network, timeout, 5xx, empty body,
+        unknown) is treated as non-retryable on the same key and triggers an
+        immediate rotation to the next configured key -- see ``synthesize``.
+        """
         if ElevenLabsApiError is not None and isinstance(error, ElevenLabsApiError):
             return getattr(error, "status_code", None) == 429
         return False

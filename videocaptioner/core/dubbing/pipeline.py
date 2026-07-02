@@ -31,6 +31,9 @@ from .models import (
 )
 from .rewriter import rewrite_segments_if_needed
 from .subtitle_parser import load_dubbing_segments
+from videocaptioner.core.utils.logger import setup_logger
+
+logger = setup_logger("dubbing")
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -141,7 +144,23 @@ class DubbingPipeline:
             ordered: list[DubbingSegment | None] = [None] * total
             for future in as_completed(future_to_pos):
                 pos = future_to_pos[future]
-                segment = future.result()
+                try:
+                    segment = future.result()
+                except Exception as exc:
+                    # A segment that exhausts every API key must not abort the
+                    # whole dub -- the quota already spent on other lines
+                    # would be wasted. Drop in a silence placeholder, record a
+                    # warning, and keep going so the run still produces audio.
+                    original = segments[pos]
+                    warnings.append(
+                        f"字幕段 {original.index} 合成失败，已用静音占位：{exc}"
+                    )
+                    logger.warning(
+                        "Segment %s synthesis failed; using silence placeholder: %s",
+                        original.index,
+                        exc,
+                    )
+                    segment = self._silence_fallback_segment(original, work)
                 ordered[pos] = segment
                 completed += 1
                 cb(10 + int(completed / total * 75), f"synthesizing {completed}/{total}")
@@ -278,6 +297,24 @@ class DubbingPipeline:
         segment.synthesized_duration_ms = get_audio_duration_ms(segment.synthesized_path)
         segment.fitted_path = self._fit_segment(segment, work)
         segment.fitted_duration_ms = get_audio_duration_ms(segment.fitted_path)
+        return segment
+
+    def _silence_fallback_segment(self, segment: DubbingSegment, work: Path) -> DubbingSegment:
+        """Build a silence-placeholder segment for a failed synthesis.
+
+        Keeps the timeline intact (a target-duration slice of silence) so the
+        rest of the dub can proceed without the failed segment shifting later
+        lines. The gap is flagged via ``segment.warning`` and the pipeline
+        warning list so the user knows which line was dropped.
+        """
+        duration_ms = max(100, segment.target_duration_ms or 1000)
+        silence_path = work / f"{segment.index:04d}_silence_fallback.wav"
+        create_silence_file(str(silence_path), duration_ms)
+        segment.synthesized_path = str(silence_path)
+        segment.synthesized_duration_ms = duration_ms
+        segment.fitted_path = str(silence_path)
+        segment.fitted_duration_ms = duration_ms
+        segment.warning = "合成失败，已用静音占位"
         return segment
 
     def _synthesize_with_duration_retry(self, segment: DubbingSegment, raw_path: Path) -> str:

@@ -216,3 +216,57 @@ def test_dubbing_pipeline_elevenlabs_workers_scale_with_api_keys(tmp_path, monke
     DubbingPipeline(config).run(str(srt), str(output), work_dir=str(tmp_path / "parts"))
 
     assert seen_workers == [8]
+
+
+def test_dubbing_pipeline_silences_failed_segment_and_continues(tmp_path, monkeypatch):
+    """A segment whose synthesis fails (all keys exhausted) must not abort the
+    dub: it's replaced with a silence placeholder so the quota already spent
+    on other lines is not wasted. This is the "配音不要停" guarantee.
+    """
+    srt = tmp_path / "input.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nOK\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nBOOM\n\n"
+        "3\n00:00:02,000 --> 00:00:03,000\nOK again\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "dub.wav"
+
+    class FlakySynthesizer:
+        def synthesize(self, request):
+            if request.text == "BOOM":
+                raise RuntimeError("all keys failed")
+            audio = AudioSegment.silent(duration=500, frame_rate=24000)
+            Path(request.output_path).parent.mkdir(parents=True, exist_ok=True)
+            audio.export(request.output_path, format="wav")
+            return SynthesisResult(
+                output_path=request.output_path,
+                voice=request.voice or "fake",
+                format="wav",
+                provider_metadata={},
+            )
+
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: FlakySynthesizer(),
+    )
+
+    config = DubbingConfig(
+        provider="gemini",
+        api_key="test",
+        base_url="",
+        model="gemini-3.1-flash-tts-preview",
+        voice="Kore",
+    )
+    result = DubbingPipeline(config).run(str(srt), str(output), work_dir=str(tmp_path / "parts"))
+
+    # The run completed and produced audio despite the mid-batch failure.
+    assert output.exists()
+    assert len(result.segments) == 3
+    # The failed segment is flagged; the other two are clean.
+    failed = [seg for seg in result.segments if seg.warning]
+    assert len(failed) == 1
+    assert failed[0].text == "BOOM"
+    assert "静音占位" in failed[0].warning
+    # A matching warning was surfaced in the result.
+    assert any("字幕段 2" in w and "静音占位" in w for w in result.warnings)

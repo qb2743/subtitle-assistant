@@ -25,6 +25,7 @@ def _patch_transcribe(monkeypatch, asr_data=None, record=None):
     def _fake_transcribe(audio_path, config, callback=None):
         if record is not None:
             record["audio_path"] = audio_path
+            record["config"] = config
         if callback:
             callback(50, "transcribing")
         return asr_data if asr_data is not None else _make_asr()
@@ -115,6 +116,19 @@ def test_empty_text_raises(tmp_path):
         TextMatchingTask(
             TextMatchingConfig(media_path=str(audio), user_text="   ")
         ).execute()
+
+
+def test_default_transcribe_config_uses_word_timestamps(tmp_path, monkeypatch):
+    record: dict = {}
+    _patch_transcribe(monkeypatch, record=record)
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"x")
+
+    TextMatchingTask(
+        TextMatchingConfig(media_path=str(audio), user_text="你好世界", output_path=str(tmp_path / "o.srt"))
+    ).execute()
+
+    assert record["config"].need_word_time_stamp is True
 
 
 def test_progress_callback_reports_stages(tmp_path, monkeypatch):

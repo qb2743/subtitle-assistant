@@ -6,6 +6,26 @@ import openai
 
 from videocaptioner.core.llm.client import normalize_base_url
 from videocaptioner.core.llm.request_logger import create_http_client
+from videocaptioner.core.llm.response_utils import (
+    extract_content_from_response,
+    get_sse_error,
+    parse_sse_string,
+)
+
+# 向后兼容别名（测试和外部代码可能引用旧名称）
+_parse_sse_string = parse_sse_string
+
+
+def _extract_response_content(response) -> str:
+    """从响应中提取内容，失败时抛 ValueError（兼容旧调用方）。"""
+    content = extract_content_from_response(response)
+    if content:
+        return content
+    # 检查是否是 SSE 错误
+    sse_error = get_sse_error(response)
+    if sse_error:
+        raise ValueError(sse_error)
+    raise ValueError("Invalid API response: unable to extract completion content")
 
 
 def check_llm_connection(
@@ -24,7 +44,6 @@ def check_llm_connection(
         (是否成功, Error output或AI助手的回复)
     """
     try:
-        # 创建OpenAI客户端并发送请求到API
         base_url = normalize_base_url(base_url)
         api_key = api_key.strip()
         response = openai.OpenAI(
@@ -40,7 +59,7 @@ def check_llm_connection(
             ],
             timeout=30,
         )
-        return True, response.choices[0].message.content
+        return True, _extract_response_content(response)
     except openai.APIConnectionError:
         return False, "API Connection Error. Please check your network or VPN."
     except openai.RateLimitError as e:
@@ -67,7 +86,6 @@ def get_available_models(base_url: str, api_key: str) -> list[str]:
     """
     try:
         base_url = normalize_base_url(base_url)
-        # 创建OpenAI客户端并获取模型列表
         models = openai.OpenAI(
             base_url=base_url,
             api_key=api_key,
@@ -75,7 +93,6 @@ def get_available_models(base_url: str, api_key: str) -> list[str]:
             http_client=create_http_client(),
         ).models.list()
 
-        # 去除非文本模型
         non_text_models = (
             "tts",
             "transcribe",
@@ -97,7 +114,6 @@ def get_available_models(base_url: str, api_key: str) -> list[str]:
             if not any(keyword in model.id.lower() for keyword in non_text_models)
         ]
 
-        # 根据不同模型设置权重进行排序
         def get_model_weight(model_name: str) -> int:
             model_name = model_name.lower()
             if model_name.startswith(("gpt-5", "claude-4", "gemini-2", "gemini-3")):

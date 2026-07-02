@@ -22,6 +22,9 @@ class LLMTranslator(BaseTranslator):
     MAX_STEPS = 3
     STRUCTURED_TEMPERATURE = 0.1
     ERROR_MARKERS = {"ERROR", "TRANSLATION_ERROR", "FAILED"}
+    # 字幕条数超过此阈值时跳过 full_context，直接用分块+多线程模式，
+    # 让线程数和批处理大小参数生效，避免一次性发送超大 payload。
+    FULL_CONTEXT_THRESHOLD = 100
 
     def __init__(
         self,
@@ -32,6 +35,7 @@ class LLMTranslator(BaseTranslator):
         custom_prompt: str,
         is_reflect: bool,
         update_callback: Optional[Callable],
+        translation_mode: str = "auto",
     ):
         super().__init__(
             thread_num=thread_num,
@@ -43,13 +47,17 @@ class LLMTranslator(BaseTranslator):
         self.model = model
         self.custom_prompt = custom_prompt
         self.is_reflect = is_reflect
+        self.translation_mode = translation_mode
 
     def translate_subtitle(self, subtitle_data: ASRData) -> ASRData:
         """Translate a subtitle with full context while preserving local timestamps.
 
-        The model receives the whole subtitle as an index-to-text JSON object. It
-        never receives timestamps, so translated text is mapped back to the
-        original ASRData segments by index and timing stays local.
+        翻译策略：
+        - 字幕条数 ≤ FULL_CONTEXT_THRESHOLD（默认 100）：full_context 模式，
+          一次性发送所有字幕给 LLM，保留完整上下文，术语/代词/人名一致。
+        - 字幕条数 > FULL_CONTEXT_THRESHOLD：直接用分块+多线程模式，
+          让线程数和批处理大小参数生效，避免一次性发送超大 payload。
+        - 两种模式失败时都会 fallback 到单条翻译。
         """
         try:
             translate_data_list = [
@@ -57,15 +65,36 @@ class LLMTranslator(BaseTranslator):
                 for i, seg in enumerate(subtitle_data.segments, 1)
             ]
 
-            try:
-                translated_list = self._safe_translate_full_context(translate_data_list)
-            except Exception as e:
-                logger.warning(
-                    f"Full-context LLM translation failed; falling back to chunked mode: {e}"
+            if self.translation_mode == "full_context":
+                use_full_context = True
+            elif self.translation_mode == "chunked":
+                use_full_context = False
+            else:
+                # auto：按阈值自动选择
+                use_full_context = len(translate_data_list) <= self.FULL_CONTEXT_THRESHOLD
+
+            if use_full_context:
+                try:
+                    translated_list = self._safe_translate_full_context(translate_data_list)
+                except Exception as e:
+                    logger.warning(
+                        f"Full-context LLM translation failed; falling back to chunked mode: {e}"
+                    )
+                    chunks = self._split_chunks(translate_data_list)
+                    translated_list = self._parallel_translate(chunks)
+                    self._repair_failed_translations(translated_list)
+            else:
+                logger.info(
+                    f"Subtitle has {len(translate_data_list)} rows (>{self.FULL_CONTEXT_THRESHOLD}), "
+                    f"using chunked + multi-thread mode (threads={self.thread_num}, batch={self.batch_num})"
                 )
                 chunks = self._split_chunks(translate_data_list)
                 translated_list = self._parallel_translate(chunks)
                 self._repair_failed_translations(translated_list)
+
+            # 翻译失败保护：如果绝大多数行都翻译失败，说明 LLM 端点有问题，
+            # 应该抛出明确错误而不是静默回填原文，避免用户看到"全是原文"。
+            self._guard_translation_quality(translated_list)
 
             new_segments = self._set_segments_translated_text(
                 subtitle_data.segments, translated_list
@@ -74,6 +103,63 @@ class LLMTranslator(BaseTranslator):
         except Exception as e:
             logger.error(f"Translation failed: {str(e)}")
             raise RuntimeError(f"Translation failed: {str(e)}")
+
+    def _guard_translation_quality(
+        self, translated_list: List[SubtitleProcessData]
+    ) -> None:
+        """翻译失败保护：若失败比例过高，抛出明确错误而不是静默回填原文。
+
+        阈值：可翻译内容中失败比例 > 50% 时视为整体失败。
+        空原文行不计入分母（无可翻译内容）。
+        """
+        total = 0
+        failed = 0
+        failed_indexes: List[int] = []
+        for data in translated_list:
+            original = (data.original_text or "").strip()
+            if not original or not self._has_translatable_content(original):
+                continue
+            total += 1
+            translated = (data.translated_text or "").strip()
+            if not translated:
+                failed += 1
+                failed_indexes.append(data.index)
+                continue
+            # 翻译结果等于原文（非英语目标语言）也视为失败
+            if (
+                self.target_language
+                not in {
+                    TargetLanguage.ENGLISH,
+                    TargetLanguage.ENGLISH_US,
+                    TargetLanguage.ENGLISH_UK,
+                }
+                and self._normalize_for_compare(original)
+                == self._normalize_for_compare(translated)
+            ):
+                failed += 1
+                failed_indexes.append(data.index)
+
+        if total == 0:
+            return
+        failure_ratio = failed / total
+        if failure_ratio > 0.5:
+            sample = ", ".join(str(i) for i in failed_indexes[:10])
+            if len(failed_indexes) > 10:
+                sample += f" ... ({len(failed_indexes)} total)"
+            raise RuntimeError(
+                f"Translation failed for {failed}/{total} rows "
+                f"({failure_ratio:.0%}). The LLM endpoint likely returned empty "
+                f"or invalid responses. Failed indexes: {sample}. "
+                f"Check AppData/logs/llm_requests.jsonl for details."
+            )
+        if failed > 0:
+            sample_warning = ", ".join(str(i) for i in failed_indexes[:10])
+            if len(failed_indexes) > 10:
+                sample_warning += f" ... ({len(failed_indexes)} total)"
+            logger.warning(
+                f"Translation partially failed: {failed}/{total} rows. "
+                f"Indexes: {sample_warning}"
+            )
 
     def _translate_chunk(
         self, subtitle_chunk: List[SubtitleProcessData]

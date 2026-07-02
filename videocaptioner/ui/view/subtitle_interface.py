@@ -225,6 +225,11 @@ class SubtitleInterface(QWidget):
         self.optimize_button.setChecked(cfg.need_optimize.value)
         self.target_language_button.setText(cfg.target_language.value.value)
         self.target_language_button.setEnabled(cfg.need_translate.value)
+        # 同步翻译模式按钮
+        current_mode = cfg.translation_mode.value
+        self.translation_mode_button.setText(
+            self._translation_mode_labels.get(current_mode, self.tr("自动"))
+        )
 
     def _setup_top_layout(self):
         # 创建水平布局
@@ -310,6 +315,27 @@ class SubtitleInterface(QWidget):
         self.target_language_button.setMenu(self.target_language_menu)
 
         self.command_bar.addWidget(self.target_language_button)
+
+        # 添加翻译模式下拉按钮
+        self.translation_mode_button = TransparentDropDownPushButton(
+            self.tr("翻译模式"), self, FIF.LANGUAGE
+        )
+        self.translation_mode_button.setFixedHeight(34)
+        self.translation_mode_button.setMinimumWidth(125)
+        self.translation_mode_menu = RoundMenu(parent=self)
+        self._translation_mode_labels = {
+            "auto": self.tr("自动"),
+            "full_context": self.tr("全上下文"),
+            "chunked": self.tr("分块多线程"),
+        }
+        for mode_key, mode_label in self._translation_mode_labels.items():
+            action = Action(text=mode_label)
+            action.triggered.connect(
+                lambda checked, k=mode_key: self.on_translation_mode_changed(k)
+            )
+            self.translation_mode_menu.addAction(action)
+        self.translation_mode_button.setMenu(self.translation_mode_menu)
+        self.command_bar.addWidget(self.translation_mode_button)
 
         self.command_bar.addSeparator()
 
@@ -978,6 +1004,18 @@ class SubtitleInterface(QWidget):
         layout_enum = SubtitleLayoutEnum(layout)  # Convert string to enum
         cfg.set(cfg.subtitle_layout, layout_enum)
         self.layout_button.setText(layout)
+
+    def on_translation_mode_changed(self, mode: str) -> None:
+        """处理翻译模式变更"""
+        cfg.set(cfg.translation_mode, mode)
+        label = self._translation_mode_labels.get(mode, self.tr("自动"))
+        self.translation_mode_button.setText(label)
+        InfoBar.success(
+            self.tr("翻译模式已切换"),
+            self.tr(f"当前模式：{label}"),
+            duration=INFOBAR_DURATION_SUCCESS,
+            parent=self,
+        )
 
 
 class PromptDialog(MessageBoxBase):

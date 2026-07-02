@@ -24,6 +24,17 @@ def test_strip_subtitle_punctuation():
         == "A diver got trapped in a narrow crevice and drowned to death"
     )
     assert strip_subtitle_punctuation("it's fine.") == "it's fine"
+    # Curly apostrophe (U+2019) normalized to ASCII ' only in English.
+    assert strip_subtitle_punctuation("Juho’s body.", language="en") == "Juho's body"
+    # English contraction detected from text even without explicit language:
+    # 's after a letter → apostrophe → normalized to ASCII.
+    assert strip_subtitle_punctuation("don’t go.") == "don't go"
+    # French/Spanish-style quotes (' ') without an English contraction pattern
+    # are quote punctuation, not apostrophes — stripped, not normalized.
+    assert strip_subtitle_punctuation("‘Bonjour’ mon ami.") == "Bonjour mon ami"
+    # In non-English (e.g. Chinese) ' ' are quote punctuation — left as-is, then
+    # removed by the strip set (they're in _SUBTITLE_STRIP_PUNCT).
+    assert strip_subtitle_punctuation("他说‘你好’。", language="zh") == "他说你好"
 
 
 def test_split_text_by_newline():
@@ -93,10 +104,12 @@ def test_optimize_duration_fills_gaps():
         {"start": 2.0, "end": 3.0, "text": "二"},
     ]
     optimized = optimize_subtitle_duration(segs)
-    # gap 1.0s -> extend_by = min(0.5, 1.0 - 0.1) = 0.5 -> first end 1.5
-    assert optimized[0]["end"] == 1.5
-    # last segment always extended by 0.5
-    assert optimized[1]["end"] == 3.5
+    # No gap between subtitles: first end == next start (2.0), capped by max
+    # (1 char -> 3.0s max, so 2.0 fits) → abuts the second.
+    assert optimized[0]["end"] == 2.0
+    # last segment: natural end (3.0) already ≥ per-text min (0.8s) and ≤ max
+    # (3.0s), no extension past the voice → stays at its natural end
+    assert optimized[1]["end"] == 3.0
 
 
 def test_align_texts_full_pipeline_no_overlap():
@@ -111,3 +124,45 @@ def test_align_texts_full_pipeline_no_overlap():
         assert aligned[i]["end"] <= aligned[i + 1]["start"] + 1e-6
     assert aligned[0]["start"] >= 0.0
     assert aligned[-1]["end"] <= 6.0 + 1.0
+
+
+def test_align_texts_splits_long_sentence_at_pause():
+    # A long punctuation-less user sentence aligned to word-level ASR segments
+    # with a real pause (1s gap between "你好世界" at [0,1] and "今天天气真好" at
+    # [2,3]). The relative-pause split must break the sentence at the pause so
+    # it becomes 2 subtitles instead of one over-long one.
+    recognized = [
+        {"start": 0.0, "end": 1.0, "text": "你好世界"},
+        {"start": 2.0, "end": 3.0, "text": "今天天气真好"},
+    ]
+    aligned = align_texts(recognized, ["你好世界今天天气真好"])
+    assert len(aligned) == 2
+    assert aligned[0]["text"] == "你好世界"
+    assert aligned[1]["text"] == "今天天气真好"
+    # Subtitles abut (no gap): first end == next start.
+    assert aligned[0]["end"] <= aligned[1]["start"] + 1e-6
+
+
+def test_align_texts_never_overlaps_after_optimize():
+    # Regression: optimize_subtitle_duration's min-duration floor used to push
+    # a short segment's end past the next segment's start, reintroducing
+    # overlap after fix_overlapping_timestamps removed it. A 1-char segment
+    # immediately followed by another must end before the next starts.
+    recognized = [
+        {"start": 0.0, "end": 0.3, "text": "a"},
+        {"start": 0.4, "end": 1.0, "text": "bc"},
+    ]
+    aligned = align_texts(recognized, ["a", "bc"])
+    assert aligned[0]["end"] <= aligned[1]["start"] + 1e-6
+
+
+def test_align_texts_merges_tiny_fragments():
+    # Regression: gap-splitting used to break "to" into "t" | "o" when DTW
+    # straddled a pause. Tiny fragments must merge into the following segment.
+    recognized = [
+        {"start": 0.0, "end": 0.5, "text": "t"},
+        {"start": 0.5, "end": 1.0, "text": "o"},
+    ]
+    aligned = align_texts(recognized, ["to"])
+    assert len(aligned) == 1
+    assert aligned[0]["text"] == "to"

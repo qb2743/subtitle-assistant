@@ -23,6 +23,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     ProgressBar,
     PushButton,
+    SpinBox,
     SubtitleLabel,
     ToolButton,
 )
@@ -145,6 +146,7 @@ class TranscriptInputCard(CardWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
+        self.setAcceptDrops(True)
 
         # 标题栏
         header_layout = QHBoxLayout()
@@ -162,17 +164,19 @@ class TranscriptInputCard(CardWidget):
         # 文本输入框
         self.text_edit = PlainTextEdit(self)
         self.text_edit.setPlaceholderText(
-            "在这里粘贴或输入正确的文稿文本...\n\n"
+            "在这里粘贴或输入正确的文稿文本，也可拖拽 txt / srt 文件到此...\n\n"
             "支持中英文，会自动检测语言。\n"
+            "拖入 txt：直接读取文本；拖入 srt/ass/vtt：自动去除序号与时间轴，仅取纯文本。\n"
             "文稿将通过 DTW 算法对齐到 ASR 识别的时间轴上。"
         )
         self.text_edit.setMinimumHeight(300)
+        self.text_edit.setAcceptDrops(False)  # 由卡片接管拖拽，避免 PlainTextEdit 自带的文件拖入行为
         self.text_edit.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.text_edit)
 
         # 按钮栏
         btn_layout = QHBoxLayout()
-        self.import_btn = PushButton(FIF.DOCUMENT, "导入 TXT", self)
+        self.import_btn = PushButton(FIF.DOCUMENT, "导入 TXT / 字幕", self)
         self.import_btn.clicked.connect(self._import_file)
         self.clear_btn = ToolButton(FIF.DELETE, self)
         self.clear_btn.clicked.connect(self.text_edit.clear)
@@ -192,25 +196,79 @@ class TranscriptInputCard(CardWidget):
         self.textChanged.emit()
 
     def _import_file(self):
-        """导入文本文件"""
+        """导入文本文件（txt/md 直读，字幕文件去时间轴取纯文本）"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择文本文件", "", "文本文件 (*.txt *.md);;所有文件 (*.*)"
+            self, "选择文本文件", "",
+            "文本与字幕 (*.txt *.md *.srt *.ass *.vtt);;所有文件 (*.*)",
         )
         if file_path:
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    self.text_edit.setPlainText(f.read())
-            except Exception as e:
+            self._load_text_file(file_path)
+
+    def _load_text_file(self, file_path: str):
+        """读取文件并填入文本框；字幕格式自动剥离序号与时间轴。"""
+        try:
+            text = _extract_text_from_file(file_path)
+            if text is None:
                 InfoBar.error(
                     title="导入失败",
-                    content=f"无法读取文件: {str(e)}",
+                    content="无法识别的文件类型，支持 txt/md/srt/ass/vtt。",
                     duration=INFOBAR_DURATION_ERROR,
                     position=InfoBarPosition.TOP,
                     parent=self,
                 )
+                return
+            self.text_edit.setPlainText(text)
+        except Exception as e:
+            InfoBar.error(
+                title="导入失败",
+                content=f"无法读取文件: {str(e)}",
+                duration=INFOBAR_DURATION_ERROR,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                p = url.toLocalFile()
+                if p and _is_supported_text_file(p):
+                    event.acceptProposedAction()
+                    return
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p and _is_supported_text_file(p):
+                self._load_text_file(p)
+                event.acceptProposedAction()
+                return
 
     def get_text(self) -> str:
         return self.text_edit.toPlainText().strip()
+
+
+# 支持拖拽 / 导入的纯文本与字幕扩展名。
+_TEXT_EXTS = {".txt", ".md"}
+_SUBTITLE_EXTS = {".srt", ".ass", ".vtt", ".ssa", ".sub"}
+
+
+def _is_supported_text_file(path: str) -> bool:
+    suffix = Path(path).suffix.lower()
+    return suffix in _TEXT_EXTS or suffix in _SUBTITLE_EXTS
+
+
+def _extract_text_from_file(path: str) -> Optional[str]:
+    """读取文件为纯文本。txt/md 直接读；字幕格式剥离序号与时间轴。"""
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix in _TEXT_EXTS:
+        return p.read_text(encoding="utf-8")
+    if suffix in _SUBTITLE_EXTS:
+        from videocaptioner.core.asr.asr_data import ASRData
+
+        asr = ASRData.from_subtitle_file(str(p))
+        return asr.to_txt() if asr.has_data() else ""
+    return None
 
 
 class TextMatchingInterface(QWidget):
@@ -221,6 +279,7 @@ class TextMatchingInterface(QWidget):
         self.setObjectName("TextMatchingInterface")
         self.setStyleSheet(TRANSCRIPTION_PAGE_QSS)
         self.worker_thread = None
+        self._running = False
         self.setup_ui()
 
     def setup_ui(self):
@@ -312,22 +371,41 @@ class TextMatchingInterface(QWidget):
         lang_hint.setStyleSheet("color: #666; font-size: 11px;")
         param_layout.addWidget(lang_hint)
 
+        max_chars_layout = QHBoxLayout()
+        max_chars_layout.addWidget(BodyLabel("每行字数:", self))
+        self.max_chars_spin = SpinBox(self)
+        self.max_chars_spin.setRange(0, 200)
+        self.max_chars_spin.setValue(30)
+        self.max_chars_spin.setSuffix(" 字")
+        self.max_chars_spin.setFixedWidth(140)
+        self.max_chars_spin.setToolTip("与 txt2srt 默认一致：30 字；设为 0 表示不按长度切分")
+        max_chars_layout.addWidget(self.max_chars_spin)
+        max_chars_layout.addStretch()
+        param_layout.addLayout(max_chars_layout)
+
+        max_chars_hint = BodyLabel("💡 30 字更接近原 txt2srt 的时间轴切分", self)
+        max_chars_hint.setStyleSheet("color: #666; font-size: 11px;")
+        param_layout.addWidget(max_chars_hint)
+
         param_layout.addStretch()
         left_layout.addWidget(param_card)
 
-        # 开始按钮
+        # 开始/取消按钮
         self.start_btn = PrimaryPushButton(FIF.PLAY, "开始匹配", self)
         self.start_btn.setFixedHeight(40)
-        self.start_btn.clicked.connect(self._start_matching)
+        self.start_btn.clicked.connect(self._on_start_or_cancel)
         left_layout.addWidget(self.start_btn)
 
-        # 进度显示
+        # 进度显示（始终占位，避免窗口高度变化）
         self.progress_bar = ProgressBar(self)
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setValue(0)
         left_layout.addWidget(self.progress_bar)
 
         self.status_label = BodyLabel("", self)
-        self.status_label.setVisible(False)
+        self.status_label.setFixedHeight(20)
         left_layout.addWidget(self.status_label)
 
         left_layout.addStretch()
@@ -344,6 +422,15 @@ class TextMatchingInterface(QWidget):
         main_layout.addLayout(content_layout)
 
         self._sync_transcribe_model_from_cfg()
+        self._load_text_match_settings()
+
+    def _load_text_match_settings(self):
+        self.max_chars_spin.setValue(cfg.text_match_max_chars.value)
+        self.max_chars_spin.valueChanged.connect(self._save_max_chars)
+
+    def _save_max_chars(self, value: int):
+        cfg.set(cfg.text_match_max_chars, value)
+        cfg.save()
 
     def _sync_transcribe_model_from_cfg(self):
         """从全局配置恢复识别模型选择。"""
@@ -368,6 +455,28 @@ class TextMatchingInterface(QWidget):
             return
         cfg.set(cfg.transcribe_model, model)
         cfg.save()
+
+    def _on_start_or_cancel(self):
+        """开始按钮在「开始」/「取消」之间切换。"""
+        if self._running:
+            self._cancel_matching()
+        else:
+            self._start_matching()
+
+    def _cancel_matching(self):
+        """取消进行中的匹配：立即释放 UI，后台 ASR 自行跑完、结果丢弃。"""
+        if self.worker_thread is not None:
+            self.worker_thread.cancel()
+        self._running = False
+        self._reset_start_button()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("已取消")
+
+    def _reset_start_button(self):
+        """按钮恢复为「开始匹配」。"""
+        self.start_btn.setIcon(FIF.PLAY)
+        self.start_btn.setText("开始匹配")
+        self.start_btn.setEnabled(True)
 
     def _start_matching(self):
         """开始匹配"""
@@ -394,11 +503,11 @@ class TextMatchingInterface(QWidget):
             )
             return
 
-        # 禁用控件
-        self.start_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
+        # 切换为取消态
+        self._running = True
+        self.start_btn.setIcon(FIF.CANCEL)
+        self.start_btn.setText("取消匹配")
         self.progress_bar.setValue(0)
-        self.status_label.setVisible(True)
         self.status_label.setText("准备中...")
 
         # 创建工作线程
@@ -409,6 +518,7 @@ class TextMatchingInterface(QWidget):
         self.worker_thread = TextMatchingThread(
             media_path=media_path,
             user_text=user_text,
+            max_chars=self.max_chars_spin.value(),
             language=language,
         )
 
@@ -422,14 +532,19 @@ class TextMatchingInterface(QWidget):
 
     def _on_progress(self, percent: int, message: str):
         """进度更新"""
+        if not self._running:
+            return
         self.progress_bar.setValue(percent)
         self.status_label.setText(message)
 
     def _on_error(self, error_msg: str):
         """处理错误"""
-        self.start_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.status_label.setVisible(False)
+        if not self._running:
+            return
+        self._running = False
+        self._reset_start_button()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("")
 
         InfoBar.error(
             title="匹配失败",
@@ -441,7 +556,10 @@ class TextMatchingInterface(QWidget):
 
     def _on_finished(self, output_path: str):
         """匹配完成"""
-        self.start_btn.setEnabled(True)
+        if not self._running:
+            return
+        self._running = False
+        self._reset_start_button()
         self.progress_bar.setValue(100)
         self.status_label.setText("匹配完成！")
 

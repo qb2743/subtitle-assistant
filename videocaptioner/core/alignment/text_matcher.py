@@ -20,6 +20,7 @@ from videocaptioner.core.asr import transcribe
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import TranscribeConfig, TranscribeModelEnum
 
+from .audio_boundary_snapper import snap_subtitles_to_audio_boundaries
 from .dtw_aligner import align_texts, split_text_into_segments, strip_subtitle_punctuation
 
 # Audio extensions that can be fed to ASR directly (no extraction needed).
@@ -34,24 +35,48 @@ def _user_text_to_sentences(
     language: str,
     smart_split: bool,
 ) -> list[str]:
-    """Split user transcript for DTW. ``max_chars <= 0`` = no length limit (by paragraph)."""
+    """Split user transcript for DTW. ``max_chars <= 0`` = split by sentence only."""
     text = user_text.strip()
     if not text:
         return []
 
+    if language == "auto":
+        language = TextMatchingTask._detect_align_language(text)
+
     if max_chars <= 0:
-        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-        return lines if lines else [text]
+        # No length cap, but still split by sentence-ending punctuation so each
+        # sentence becomes its own subtitle instead of feeding whole paragraphs
+        # to DTW as one giant merged segment.
+        return _split_into_sentences(text)
 
     if language == "en" and smart_split:
-        return _split_english_by_words(text, max_chars)
+        return _split_english_by_words(text, max(max_chars, 50))
     return split_text_into_segments(text, max_chars=max_chars)
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    """Split by newline then sentence-ending punctuation; never merge across sentences."""
+    import re
+
+    sentences: list[str] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"([。！？.!?;；])", line)
+        for i in range(0, len(parts), 2):
+            chunk = parts[i]
+            punct = parts[i + 1] if i + 1 < len(parts) else ""
+            seg = (chunk + punct).strip()
+            if seg:
+                sentences.append(seg)
+    return sentences if sentences else [text]
 
 
 def align_text_to_asr(
     asr_data: ASRData,
     user_text: str,
-    max_chars: int = 0,
+    max_chars: int = 30,
     language: str = "zh",
     smart_split: bool = True,
 ) -> ASRData:
@@ -66,7 +91,9 @@ def align_text_to_asr(
 
     Returns:
         A new :class:`ASRData` whose segments carry the user's text on the
-        ASR's timeline (millisecond timings). Punctuation is stripped except ``'``.
+        ASR's timeline (millisecond timings). Sentence punctuation is kept
+        during DTW alignment for accurate splitting, then stripped from the
+        final subtitle text (ASCII apostrophe ``'`` preserved).
     """
     recognized = [
         {"start": seg.start_time / 1000.0, "end": seg.end_time / 1000.0, "text": seg.text}
@@ -75,54 +102,41 @@ def align_text_to_asr(
 
     user_sentences = _user_text_to_sentences(user_text, max_chars, language, smart_split)
 
-    aligned = align_texts(recognized, user_sentences)
+    aligned = align_texts(recognized, user_sentences, allow_pause_split=(max_chars > 0))
     new_segments = [
         ASRDataSeg(
-            text=strip_subtitle_punctuation(s["text"].strip()),
+            text=strip_subtitle_punctuation(s["text"].strip(), language),
             start_time=int(round(s["start"] * 1000)),
             end_time=int(round(s["end"] * 1000)),
         )
         for s in aligned
-        if strip_subtitle_punctuation(s["text"].strip())
+        if strip_subtitle_punctuation(s["text"].strip(), language)
     ]
     return ASRData(new_segments)
 
 
 def _split_english_by_words(text: str, max_chars: int) -> list:
-    """将英文文本按单词边界分段
+    """将英文文本按单词边界分段"""
+    import re
 
-    Args:
-        text: 英文文本
-        max_chars: 每段最大字符数
-
-    Returns:
-        分段后的文本列表
-    """
-    words = text.split()
-    segments = []
-    current_segment = []
-    current_length = 0
-
-    for word in words:
-        word_length = len(word)
-
-        # 如果加上这个单词不超过限制（考虑空格）
-        if current_length + word_length + len(current_segment) <= max_chars:
-            current_segment.append(word)
-            current_length += word_length
-        else:
-            # 保存当前段
-            if current_segment:
-                segments.append(" ".join(current_segment))
-
-            # 开始新段
-            current_segment = [word]
-            current_length = word_length
-
-    # 添加最后一段
-    if current_segment:
-        segments.append(" ".join(current_segment))
-
+    segments: list[str] = []
+    for sentence in _split_into_sentences(text):
+        words = sentence.split()
+        current: list[str] = []
+        current_length = 0
+        for word in words:
+            clean = re.sub(r"[.!?;；]+$", "", word)
+            word_length = len(clean)
+            projected = current_length + word_length + len(current)
+            if current and projected > max_chars:
+                segments.append(" ".join(current))
+                current = [word]
+                current_length = word_length
+            else:
+                current.append(word)
+                current_length += word_length
+        if current:
+            segments.append(" ".join(current))
     return segments
 
 
@@ -133,9 +147,14 @@ class TextMatchingConfig:
     media_path: str
     user_text: str
     output_path: str = ""
-    max_chars: int = 0
+    max_chars: int = 30
     language: str = ""
     smart_split: bool = True
+    snap_audio_boundaries: bool = True
+    # Write a .debug.json beside the output SRT recording per-segment
+    # ASR/DTW/snap timestamps so a mis-aligned subtitle can be diagnosed. Off by
+    # default; set True to investigate a specific misalignment.
+    debug_dump: bool = False
     # Full ASR config; if omitted, a FasterWhisper default is used. The caller
     # typically supplies this (with the chosen engine, model dir, api key, ...).
     transcribe_config: Optional[TranscribeConfig] = None
@@ -180,33 +199,78 @@ class TextMatchingTask:
             asr_data = transcribe(str(audio_path), trans_cfg, callback=_asr_cb)
             if not asr_data.segments:
                 raise RuntimeError("ASR produced no segments")
+
+            # 3. DTW align the user's correct transcript onto the ASR timeline.
+            cb(70, "aligning transcript via DTW")
+            align_language = cfg.language or self._detect_align_language(cfg.user_text)
+            aligned = align_text_to_asr(
+                asr_data,
+                cfg.user_text,
+                max_chars=cfg.max_chars,
+                language=align_language,
+                smart_split=cfg.smart_split,
+            )
+            dtw_segments = [
+                {"start_ms": s.start_time, "end_ms": s.end_time, "text": s.text}
+                for s in aligned.segments
+            ]
+            snap_chain: list[dict] = []
+            if cfg.snap_audio_boundaries:
+                cb(88, "snapping subtitle boundaries")
+                aligned = snap_subtitles_to_audio_boundaries(
+                    aligned, str(audio_path), debug_log=snap_chain if cfg.debug_dump else None
+                )
+            if not aligned.segments:
+                raise RuntimeError("alignment produced no segments")
+
+            # 4. Save the aligned subtitle.
+            cb(95, "saving subtitle")
+            out = (
+                Path(cfg.output_path)
+                if cfg.output_path
+                else media.with_name(media.stem + ".aligned.srt")
+            )
+            aligned.save(str(out))
+            if cfg.debug_dump:
+                self._write_debug_dump(out, asr_data, dtw_segments, snap_chain)
+            cb(100, "completed")
+            return out
         finally:
             if temp_audio and Path(temp_audio).exists():
                 Path(temp_audio).unlink(missing_ok=True)
 
-        # 3. DTW align the user's correct transcript onto the ASR timeline.
-        cb(70, "aligning transcript via DTW")
-        align_language = cfg.language or self._detect_align_language(cfg.user_text)
-        aligned = align_text_to_asr(
-            asr_data,
-            cfg.user_text,
-            max_chars=cfg.max_chars,
-            language=align_language,
-            smart_split=cfg.smart_split,
-        )
-        if not aligned.segments:
-            raise RuntimeError("alignment produced no segments")
+    @staticmethod
+    def _write_debug_dump(
+        srt_path: Path,
+        asr_data: "ASRData",
+        dtw_segments: list[dict],
+        snap_chain: list[dict],
+    ) -> None:
+        """TEMP: dump per-segment timing at each pipeline stage next to the SRT.
 
-        # 4. Save the aligned subtitle.
-        cb(95, "saving subtitle")
-        out = (
-            Path(cfg.output_path)
-            if cfg.output_path
-            else media.with_name(media.stem + ".aligned.srt")
-        )
-        aligned.save(str(out))
-        cb(100, "completed")
-        return out
+        For each final subtitle the chain is: ASR raw segment → DTW aligned
+        segment → snapped segment. When a subtitle shows at the wrong time,
+        reading which stage moved it (or whether ASR itself was off) tells us
+        whether the bug is ASR, DTW, or the snap post-processor.
+        """
+        import json
+
+        asr_segments = [
+            {"start_ms": s.start_time, "end_ms": s.end_time, "text": s.text}
+            for s in asr_data.segments
+        ]
+        dump = {
+            "asr_raw": asr_segments,
+            "dtw_aligned": dtw_segments,
+            "snap_chain": snap_chain,
+        }
+        debug_path = srt_path.with_suffix(".debug.json")
+        try:
+            debug_path.write_text(
+                json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     def _ensure_audio(self, media: Path) -> tuple[str, Optional[str]]:
         """Return (audio_path, temp_audio_path_or_None). Extracts audio from video."""
@@ -235,7 +299,7 @@ class TextMatchingTask:
         return TranscribeConfig(
             transcribe_model=TranscribeModelEnum.FASTER_WHISPER,
             transcribe_language=lang,
-            need_word_time_stamp=False,
+            need_word_time_stamp=True,
         )
 
     @staticmethod

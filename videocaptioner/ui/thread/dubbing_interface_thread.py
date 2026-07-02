@@ -107,11 +107,13 @@ class DubbingInterfaceThread(QThread):
         self.finished.emit(str(output.audio_path))
 
     def _run_text_mode(self, config):
-        """文案直接配音模式"""
+        """文案直接配音模式 — 生成临时 SRT 后复用字幕配音流程"""
+        import tempfile
+        from datetime import datetime
+
         user_text = self.input_data
         logger.info(f"文案配音，文本长度: {len(user_text)} 字符")
 
-        # 1. 文本分段（0-10%）
         self.progress.emit(5, "分析文案...")
         segments = self._split_text_into_segments(user_text)
 
@@ -121,43 +123,37 @@ class DubbingInterfaceThread(QThread):
         logger.info(f"文案分为 {len(segments)} 段")
         self.progress.emit(10, f"已分段: {len(segments)} 段")
 
-        # 2. 创建 ASRData（文案模式下没有真实时间戳）
-        asr_data = ASRData(
-            segments=[
-                ASRDataSeg(
-                    start_ms=i * 5000,  # 每段假设 5 秒间隔
-                    end_ms=(i + 1) * 5000,
-                    text=seg,
-                )
-                for i, seg in enumerate(segments)
-            ],
-            text=user_text,
-            language="auto",
-        )
+        # 构造 ASRData 并写成临时 SRT，pipeline 直接读 SRT
+        asr_data = ASRData([
+            ASRDataSeg(text=seg, start_time=i * 5000, end_time=(i + 1) * 5000)
+            for i, seg in enumerate(segments)
+        ])
+        # fixed_line_pause 模式下时间戳无意义，确保开启
+        config.fixed_line_pause = True
 
-        # 3. 配音合成（10-90%）
-        self.progress.emit(15, "初始化配音引擎...")
-        pipeline = DubbingPipeline(config)
+        tmp_srt = tempfile.NamedTemporaryFile(suffix=".srt", delete=False, mode="w", encoding="utf-8")
+        try:
+            tmp_srt.write(asr_data.to_srt())
+            tmp_srt.close()
 
-        logger.info(f"开始配音，provider: {config.provider}")
+            self.progress.emit(15, "初始化配音引擎...")
+            pipeline = DubbingPipeline(config)
+            logger.info(f"开始配音，provider: {config.provider}")
 
-        # 生成输出路径（文案模式）
-        if not self.output_path:
-            # 使用当前目录的 dubbing 子文件夹
-            output_dir = Path.cwd() / "dubbing"
-            output_dir.mkdir(parents=True, exist_ok=True)
+            if not self.output_path:
+                output_dir = Path.cwd() / "dubbing"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.output_path = str(output_dir / f"dubbing_{timestamp}.mp3")
+                logger.info(f"自动生成输出路径: {self.output_path}")
 
-            # 使用时间戳作为文件名
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.output_path = str(output_dir / f"dubbing_{timestamp}.mp3")
-            logger.info(f"自动生成输出路径: {self.output_path}")
-
-        output = pipeline.run(
-            asr_data=asr_data,
-            output_path=self.output_path,
-            progress_callback=self._on_pipeline_progress,
-        )
+            output = pipeline.run(
+                subtitle_path=tmp_srt.name,
+                output_audio_path=self.output_path,
+                callback=self._on_pipeline_progress,
+            )
+        finally:
+            Path(tmp_srt.name).unlink(missing_ok=True)
 
         if self._cancelled:
             return

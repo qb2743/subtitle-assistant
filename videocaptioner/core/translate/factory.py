@@ -26,6 +26,7 @@ class TranslatorFactory:
         custom_prompt: str = "",
         is_reflect: bool = False,
         update_callback: Optional[Callable] = None,
+        translation_mode: str = "auto",
     ) -> BaseTranslator:
         """创建翻译器实例"""
         try:
@@ -42,6 +43,7 @@ class TranslatorFactory:
                     custom_prompt=custom_prompt,
                     is_reflect=is_reflect,
                     update_callback=update_callback,
+                    translation_mode=translation_mode,
                 )
             elif translator_type == TranslatorType.GOOGLE:
                 batch_num = 5

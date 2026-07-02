@@ -39,6 +39,20 @@ GEMINI_VOICES = {
     "Zubenelgenubi",
 }
 
+# Fish Audio 官方默认音色（始终可用，不依赖账户自建）。
+# 取自 fish.audio/app/default-voices/ 当前 8 个默认音色，reference_id 已通过
+# GET /model/<id> 逐个验证（2026-07-02）。旧版 Brian/Dolly 已从默认页移除。
+FISHAUDIO_PRESET_VOICES = [
+    ("Ethan", "536d3a5e000945adb7038665781a4aca"),
+    ("Sarah", "933563129e564b19a115bedd57b7406a"),
+    ("Selene", "b347db033a6549378b48d00acb0d06cd"),
+    ("Adrian", "bf322df2096a46f18c579d0baa36f41d"),
+    ("E-girl", "98655a12fa944e26b274c535e5e03842"),
+    ("Hannah", "9a9cf47702da476aa4629e2506d4a857"),
+    ("Jordan", "79d0bd3e4e5444b18f7b6d89b5927bf1"),
+    ("Laura", "e3cd384158934cc9a01029cd7d278634"),
+]
+
 EDGE_VOICE_ALIASES = {
     "xiaoxiao": "zh-CN-XiaoxiaoNeural",
     "xiaoyi": "zh-CN-XiaoyiNeural",
@@ -252,6 +266,10 @@ def normalize_dubbing_voice(provider: str, model: str, voice: str) -> str:
         # Not a known alias: assume it is a raw voice ID (custom/cloned/
         # library voice) and pass it through unchanged.
         return voice
+    if provider == "fishaudio":
+        # Fish Audio voice = a model _id (from /model upload) or a preset
+        # reference_id; both are opaque tokens, pass through unchanged.
+        return voice
     return voice
 
 
@@ -286,6 +304,11 @@ def validate_dubbing_voice(provider: str, voice: str) -> str | None:
             f"ElevenLabs voice must be a short alias ({aliases}), a full voice "
             f"name, or a raw voice ID. Got: {voice!r}"
         )
+    if provider == "fishaudio":
+        # Voice is an opaque model _id / reference_id (from Fish /model upload
+        # or a shared model). Accept any non-empty token; empty is also OK
+        # (Fish falls back to the base model's default voice).
+        return None
     return None
 
 

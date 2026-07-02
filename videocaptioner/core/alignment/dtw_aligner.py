@@ -32,16 +32,42 @@ logger = setup_logger("alignment.dtw")
 # CJK + ASCII punctuation and whitespace stripped before char-level matching.
 _PUNCTUATION = set("。，！？；：、,.!?;: 　「」『』“”‘’（）()【】[]")
 
-# Punctuation removed from final subtitle text (apostrophe ' and spaces kept).
+# Punctuation removed from final subtitle text (ASCII apostrophe ' and spaces kept;
+# curly quotes ‘ ’ “ ” are stripped — English normalizes ’ to ' first so it survives).
 _SUBTITLE_STRIP_PUNCT = set(
     "。，！？；：、,.!?;:　「」『』“”‘’（）()【】[]\"\"…—–·《》〈〉"
 )
 
 
-def strip_subtitle_punctuation(text: str) -> str:
-    """Remove punctuation from displayed subtitle text; keep ASCII apostrophe '."""
+# Contractions/possessives where ' is an apostrophe, not a quote: Juho's, don't,
+# they're, we've, you'll, I'm, she'd. Curly ' is what sources usually ship.
+_ENGLISH_APOSTROPHE = re.compile(r"[’‘]['‘]?(?:s|t|re|ve|ll|m|d)\b", re.IGNORECASE)
+
+
+def _should_normalize_apostrophe(text: str, language: str) -> bool:
+    """True when ' is used as an English apostrophe, not a quote punctuation.
+
+    Explicit English (``language`` starts with "en") → always. Otherwise detect
+    an English contraction/possessive pattern in the text so French/Spanish/etc.
+    quote usage ('¡hola!') is not mistreated.
+    """
+    if language.lower().startswith("en"):
+        return True
+    return bool(_ENGLISH_APOSTROPHE.search(text))
+
+
+def strip_subtitle_punctuation(text: str, language: str = "") -> str:
+    """Remove punctuation from displayed subtitle text; keep ASCII apostrophe '.
+
+    Curly apostrophes (' ') are normalized to ASCII ' when the text is English
+    (explicit ``language`` = "en", or an English contraction/possessive like
+    "Juho's", "don't" is detected). In other languages ' ' are quote
+    punctuation and are stripped, not normalized.
+    """
     if not text:
         return text
+    if _should_normalize_apostrophe(text, language):
+        text = text.replace("‘", "'").replace("’", "'")
     return "".join(c for c in text if c not in _SUBTITLE_STRIP_PUNCT)
 
 
@@ -142,6 +168,7 @@ def _force_split_by_chars(text: str, max_chars: int) -> List[str]:
 def match_user_text_to_timestamps(
     recognized_segments: List[Dict],
     user_sentences: List[str],
+    allow_pause_split: bool = True,
 ) -> List[Dict]:
     """DTW-align user sentences onto recognized segment timestamps.
 
@@ -158,7 +185,13 @@ def match_user_text_to_timestamps(
         return []
 
     recognized_chars = list(remove_punctuation("".join(seg["text"] for seg in recognized_segments)))
-    user_chars = list(remove_punctuation("".join(user_sentences)))
+    # Track each stripped user char's index in the original joined text so that
+    # after gap-splitting we can slice the original text (preserving spaces /
+    # mid-sentence punctuation) for each sub-segment.
+    user_text_full = "".join(user_sentences)
+    _stripped = [(c, i) for i, c in enumerate(user_text_full) if c.strip() and c not in _PUNCTUATION]
+    user_chars = [c for c, _ in _stripped]
+    orig_positions = [p for _, p in _stripped]
     n_user = len(user_chars)
     n_recognized = len(recognized_chars)
     if n_user == 0 or n_recognized == 0:
@@ -225,7 +258,51 @@ def match_user_text_to_timestamps(
                 break
         user_char_times[i] = (prev_time + next_time) / 2
 
-    # Consume user chars sentence-by-sentence to assign each sentence a span.
+    # Group user chars back into subtitle segments. Within each user sentence,
+    # split at *relative* pauses: a gap that is much larger than the sentence's
+    # typical inter-char gap means the speaker paused → start a new subtitle.
+    # Relative (not absolute) so evenly-spaced ASR text isn't over-split, while
+    # real pauses — gaps several× the median — still break long punctuation-less
+    # sentences at natural speech pauses.
+    PAUSE_RATIO = 3.0
+    PAUSE_MIN = 0.25
+
+    def _char_end_time(idx: int) -> float:
+        """End time of a user char = end of the recognized word it maps to."""
+        info = user_char_to_segment[idx]
+        if info:
+            return info["segment"]["end"]
+        if idx + 1 < n_user and user_char_times[idx + 1] is not None:
+            return user_char_times[idx + 1]
+        return last_end
+
+    def _append_sub(out: List[Dict], s: int, e: int) -> None:
+        """Append a sub-segment spanning user chars [s, e) using original text."""
+        if e <= s:
+            return
+        start_time = user_char_times[s]
+        if start_time is None:
+            start_time = user_char_times[s - 1] if s > 0 and user_char_times[s - 1] is not None else 0.0
+        end_time = _char_end_time(e - 1)
+        if end_time - start_time < 0.5:
+            end_time = start_time + 0.5
+        text = user_text_full[orig_positions[s] : orig_positions[e - 1] + 1]
+        if text.strip():
+            out.append({"start": start_time, "end": end_time, "text": text})
+
+    def _pause_threshold(lo: int, hi: int) -> float:
+        """Median inter-char gap within [lo, hi); threshold = max(median*ratio, PAUSE_MIN)."""
+        gaps = []
+        for k in range(lo + 1, hi):
+            a, b = user_char_times[k - 1], user_char_times[k]
+            if a is not None and b is not None and b > a:
+                gaps.append(b - a)
+        if not gaps:
+            return float("inf")
+        gaps.sort()
+        median = gaps[len(gaps) // 2]
+        return max(median * PAUSE_RATIO, PAUSE_MIN)
+
     aligned_segments: List[Dict] = []
     char_idx = 0
     for sentence in user_sentences:
@@ -248,11 +325,20 @@ def match_user_text_to_timestamps(
                 )
             break
 
-        start_time = user_char_times[start_char_idx]
-        end_time = user_char_times[min(end_char_idx - 1, n_user - 1)]
-        if end_time - start_time < 0.5:
-            end_time = start_time + max(0.5, len(sentence_chars) * 0.15)
-        aligned_segments.append({"start": start_time, "end": end_time, "text": sentence.strip()})
+        # Walk the sentence's chars; cut a new sub-segment at each pause.
+        # When the user disabled length-based splitting (max_chars <= 0), keep
+        # each sentence as a single subtitle regardless of internal pauses —
+        # splitting "reached 135 | meters" mid-sentence is worse than a long line.
+        threshold = _pause_threshold(start_char_idx, end_char_idx)
+        sub_start = start_char_idx
+        if allow_pause_split:
+            for k in range(start_char_idx + 1, end_char_idx):
+                t_prev = user_char_times[k - 1]
+                t_curr = user_char_times[k]
+                if t_prev is not None and t_curr is not None and t_curr - t_prev >= threshold:
+                    _append_sub(aligned_segments, sub_start, k)
+                    sub_start = k
+        _append_sub(aligned_segments, sub_start, end_char_idx)
         char_idx = end_char_idx
 
     if len(aligned_segments) < len(user_sentences):
@@ -263,14 +349,41 @@ def match_user_text_to_timestamps(
     return aligned_segments
 
 
+def _merge_tiny_segments(segments: List[Dict], min_chars: int = 2) -> List[Dict]:
+    """Merge fragments too short to stand alone into the following segment.
+
+    Gap-splitting can break a word across two subtitles when DTW maps its
+    chars to times straddling a pause threshold (e.g. "to" → "t" | "o").
+    Merge any fragment whose stripped content is < ``min_chars`` chars into the
+    next segment so a lone letter never becomes its own subtitle.
+    """
+    if len(segments) < 2:
+        return segments
+    merged: List[Dict] = []
+    for seg in segments:
+        tiny = len(remove_punctuation(seg["text"])) < min_chars
+        if tiny and merged:
+            prev = merged[-1]
+            prev["text"] = prev["text"] + seg["text"]
+            prev["end"] = max(prev["end"], seg["end"])
+        else:
+            merged.append(seg)
+    return merged
+
+
 def fix_overlapping_timestamps(segments: List[Dict]) -> List[Dict]:
-    """Enforce strictly non-overlapping, in-order segments with sane durations."""
+    """Enforce strictly non-overlapping, in-order segments with a max-duration cap.
+
+    Min-duration padding is left to :func:`optimize_subtitle_duration` so that
+    it can fill gaps against the *next* segment's start; doing it here would
+    force long sentences to overrun (the old ``0.5 + chars*0.15`` formula pushed
+    a 20-char sentence to ≥3.5s even when the voice had ended).
+    """
     if not segments:
         return segments
 
     segments = sorted(segments, key=lambda x: x["start"])
     fixed: List[Dict] = []
-    duration_fixed = 0
 
     for i, segment in enumerate(segments):
         start = segment["start"]
@@ -278,60 +391,69 @@ def fix_overlapping_timestamps(segments: List[Dict]) -> List[Dict]:
         text = segment["text"]
         text_chars = len(remove_punctuation(text))
         max_duration = max(3.0, 1.0 + text_chars * 0.25)
-        min_duration = max(1.0, 0.5 + text_chars * 0.15)
 
-        if i > 0:
-            prev_end = fixed[-1]["end"]
-            if start < prev_end:
-                start = prev_end
+        if i > 0 and start < fixed[-1]["end"]:
+            start = fixed[-1]["end"]
 
-        duration = end - start
-        if duration > max_duration:
+        if end - start > max_duration:
             end = start + max_duration
-            duration = end - start
-            duration_fixed += 1
-        if duration < min_duration:
-            end = start + min_duration
+
+        if i + 1 < len(segments) and end > segments[i + 1]["start"]:
+            end = segments[i + 1]["start"]
 
         if end <= start:
             end = start + max(1.0, text_chars * 0.15)
 
-        if i + 1 < len(segments):
-            next_start = segments[i + 1]["start"]
-            if end > next_start:
-                end = next_start
-
-        if end <= start:
-            end = start + 0.5
-
         fixed.append({"start": start, "end": end, "text": text})
 
-    if duration_fixed:
-        logger.debug("Fixed %d over-long duration(s)", duration_fixed)
     return fixed
 
 
-def optimize_subtitle_duration(segments: List[Dict], max_extension: float = 0.5) -> List[Dict]:
-    """Fill small inter-segment gaps (and extend the last segment) for readability."""
+def optimize_subtitle_duration(segments: List[Dict], max_gap_fill: float = 2.0) -> List[Dict]:
+    """Make durations readable: no gaps between subtitles, capped by max duration.
+
+    Each segment's end is extended to the next segment's start (so subtitles
+    abut — current ends, next immediately begins), capped by a per-text max
+    duration so a short line doesn't span a long silence. The min-duration
+    floor is applied only when it fits before the next start. The last segment
+    keeps its natural end (lifted to min, capped at max) — no extension past
+    the voice.
+    """
     if not segments:
         return segments
+
+    def _bounds(text: str) -> tuple[float, float]:
+        chars = len(remove_punctuation(text))
+        return max(0.8, 0.3 + chars * 0.06), max(3.0, 1.0 + chars * 0.25)
+
     for i in range(len(segments) - 1):
         curr = segments[i]
-        gap = segments[i + 1]["start"] - curr["end"]
-        if gap > 0:
-            extend_by = min(max_extension, gap - 0.1)
-            if extend_by > 0:
-                curr["end"] += extend_by
-    segments[-1]["end"] += 0.5
+        next_start = segments[i + 1]["start"]
+        min_dur, max_dur = _bounds(curr["text"])
+        # Fill the gap: end at next_start (no gap), capped by max duration.
+        desired = min(curr["start"] + max_dur, next_start)
+        # Lift to min duration, but never past next_start (no overlap).
+        desired = max(desired, min(curr["start"] + min_dur, next_start))
+        # Never shrink below the natural end either.
+        desired = max(desired, curr["end"])
+        curr["end"] = desired
+
+    last = segments[-1]
+    min_dur, max_dur = _bounds(last["text"])
+    desired = max(last["start"] + min_dur, last["end"])
+    desired = min(desired, last["start"] + max_dur)
+    last["end"] = desired
     return segments
 
 
 def align_texts(
     recognized_segments: List[Dict],
     user_sentences: List[str],
+    allow_pause_split: bool = True,
 ) -> List[Dict]:
-    """Full alignment pipeline: DTW match → fix overlaps → optimize durations."""
-    aligned = match_user_text_to_timestamps(recognized_segments, user_sentences)
+    """Full alignment pipeline: DTW match → merge tiny → fix overlaps → optimize durations."""
+    aligned = match_user_text_to_timestamps(recognized_segments, user_sentences, allow_pause_split=allow_pause_split)
+    aligned = _merge_tiny_segments(aligned)
     aligned = fix_overlapping_timestamps(aligned)
     aligned = optimize_subtitle_duration(aligned)
     return aligned

@@ -25,7 +25,7 @@ def _build_transcribe_config(language: str) -> TranscribeConfig:
     return TranscribeConfig(
         transcribe_model=cfg.transcribe_model.value,
         transcribe_language=_ui_language_to_transcribe(language),
-        need_word_time_stamp=False,
+        need_word_time_stamp=True,  # 逐字时间戳：DTW 对齐到字级，时间更准；停顿处可断句
         output_format=TranscribeOutputFormatEnum.SRT,
         whisper_model=cfg.whisper_model.value,
         whisper_api_key=cfg.whisper_api_key.value,
@@ -36,7 +36,7 @@ def _build_transcribe_config(language: str) -> TranscribeConfig:
         faster_whisper_model=cfg.faster_whisper_model.value,
         faster_whisper_model_dir=str(MODEL_PATH),
         faster_whisper_device=cfg.faster_whisper_device.value,
-        faster_whisper_vad_filter=cfg.faster_whisper_vad_filter.value,
+        faster_whisper_vad_filter=True,  # 文稿匹配依赖稳定语音段时间轴，贴近 txt2srt 默认
         faster_whisper_vad_threshold=cfg.faster_whisper_vad_threshold.value,
         faster_whisper_vad_method=cfg.faster_whisper_vad_method.value,
         faster_whisper_ff_mdx_kim2=cfg.faster_whisper_ff_mdx_kim2.value,
@@ -56,7 +56,7 @@ class TextMatchingThread(QThread):
         self,
         media_path: str,
         user_text: str,
-        max_chars: int = 0,
+        max_chars: int = 30,
         language: str = "auto",
         smart_split: bool = True,
         asr_engine: str = "faster_whisper",

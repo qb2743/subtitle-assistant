@@ -16,7 +16,7 @@
 - **[pyvideotrans](https://github.com/jianchang512/pyvideotrans)** — 多 TTS 与配音流程参考  
 - **txt2srt-main** — 文稿与时间轴对齐（DTW）思路  
 
-维护者：**qb2743** · 仓库：[GitHub](https://github.com/qb2743/subtitle-assistant)（仓库名可在 `videocaptioner/config.py` 中修改 `GITHUB_REPO`）
+维护者：**qb2743** · 仓库：[GitHub](https://github.com/qb2743/subtitle-assistant)
 
 更多背景见 [docs/PROJECT.md](docs/PROJECT.md)。
 

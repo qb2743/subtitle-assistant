@@ -209,6 +209,24 @@ class TextInputCard(CardWidget):
         return self.text_edit.toPlainText().strip()
 
 
+# 各云端 provider 的模型下拉项。__init__ 初始化与 _on_provider_changed 切换时都从这里重建，
+# 避免不同 provider 的模型互相残留污染（例如切到 fishaudio 后 s 系列模型残留在 elevenlabs）。
+ELEVENLABS_MODEL_ITEMS = [
+    "eleven_flash_v2_5 - Flash v2.5 快速（推荐）",
+    "eleven_multilingual_v2 - Multilingual v2 高保真",
+    "eleven_v3 - v3 最强表现力 70+语言",
+    "eleven_turbo_v2_5 - Turbo v2.5 快速",
+    "eleven_monolingual_v1 - Monolingual v1 仅英文",
+]
+
+FISHAUDIO_MODEL_ITEMS = [
+    "s2.1-pro - s2.1 Pro 高保真（推荐）",
+    "s2.1-pro-free - s2.1 Pro 免费版（开发测试）",
+    "s2-pro - s2 Pro（上一代）",
+    "s1 - s1（旧版，13 语种）",
+]
+
+
 class DubbingInterface(QWidget):
     """配音主界面"""
 
@@ -355,13 +373,7 @@ class DubbingInterface(QWidget):
         model_layout.addWidget(self.model_label)
 
         self.model_combo = ComboBox(self)
-        self.model_combo.addItems([
-            "eleven_flash_v2_5 - Flash v2.5 快速（推荐）",
-            "eleven_multilingual_v2 - Multilingual v2 高保真",
-            "eleven_v3 - v3 最强表现力 70+语言",
-            "eleven_turbo_v2_5 - Turbo v2.5 快速",
-            "eleven_monolingual_v1 - Monolingual v1 仅英文",
-        ])
+        self.model_combo.addItems(ELEVENLABS_MODEL_ITEMS)
         model_layout.addWidget(self.model_combo, 1)
         voice_layout.addLayout(model_layout)
 
@@ -1110,6 +1122,28 @@ class DubbingInterface(QWidget):
     def _on_workers_reset(self):
         self.workers_spin.setValue(5)
 
+    def _rebuild_model_combo(self, items, default_index=0):
+        """重建模型下拉框并按已保存模型恢复选择。
+
+        每次切换 provider 时都重建，避免上一个 provider 的模型项残留在当前 provider
+        的下拉框里（例如 fishaudio 的 s 系列泄漏进 elevenlabs）。若已保存的模型不属于
+        当前 provider（如 elevenlabs 下读到 fishaudio 的 s2.1-pro），回退到 default_index。
+        """
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(items)
+        saved_model = (cfg.dubbing_model.value or "").strip()
+        if saved_model:
+            for i in range(self.model_combo.count()):
+                if self.model_combo.itemText(i).startswith(saved_model):
+                    self.model_combo.setCurrentIndex(i)
+                    break
+            else:
+                self.model_combo.setCurrentIndex(default_index)
+        else:
+            self.model_combo.setCurrentIndex(default_index)
+        self.model_combo.blockSignals(False)
+
     def _on_provider_changed(self, text):
         """Provider 改变时的提示和界面更新"""
         import logging
@@ -1183,6 +1217,9 @@ class DubbingInterface(QWidget):
             self.test_api_btn.setEnabled(True)
             self.api_base_label.setVisible(False)
             self.api_base_edit.setVisible(False)
+
+            # 重建模型下拉为 ElevenLabs 模型，清掉从 fishaudio 等切换时残留的模型项
+            self._rebuild_model_combo(ELEVENLABS_MODEL_ITEMS)
 
             # 尝试从缓存加载音色列表
             cached_voices = self._load_voice_cache(provider)
@@ -1286,20 +1323,7 @@ class DubbingInterface(QWidget):
                 self.api_base_edit.setText("https://api.fish.audio")
 
             # 模型列表（Fish Audio s 系列，见 docs.fish.audio）
-            self.model_combo.blockSignals(True)
-            self.model_combo.clear()
-            self.model_combo.addItems([
-                "s2.1-pro - s2.1 Pro 高保真（推荐）",
-                "s2.1-pro-free - s2.1 Pro 免费版（开发测试）",
-                "s2-pro - s2 Pro（上一代）",
-                "s1 - s1（旧版，13 语种）",
-            ])
-            saved_model = (cfg.dubbing_model.value or "").strip() or "s2.1-pro"
-            for i in range(self.model_combo.count()):
-                if self.model_combo.itemText(i).startswith(saved_model):
-                    self.model_combo.setCurrentIndex(i)
-                    break
-            self.model_combo.blockSignals(False)
+            self._rebuild_model_combo(FISHAUDIO_MODEL_ITEMS)
 
             # 音色：官方预设始终可用 + 参考音频克隆（opt-in）+ 保存的自定义音色
             from videocaptioner.core.dubbing.presets import FISHAUDIO_PRESET_VOICES

@@ -33,7 +33,7 @@ def test_dubbing_pipeline_creates_timeline_audio(tmp_path, monkeypatch):
     srt = tmp_path / "input.srt"
     srt.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n[Alice] Hello\n\n"
-        "2\n00:00:01,200 --> 00:00:02,000\nBob: Hi\n",
+        "2\n00:00:01,200 --> 00:00:02,000\n[Bob] Hi\n",
         encoding="utf-8",
     )
     output = tmp_path / "dub.wav"

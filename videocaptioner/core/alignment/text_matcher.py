@@ -12,6 +12,7 @@ For a full video/audio + transcript → aligned SRT pipeline, use
 :class:`TextMatchingTask` (ASR + DTW in one call).
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -35,7 +36,7 @@ def _user_text_to_sentences(
     language: str,
     smart_split: bool,
 ) -> list[str]:
-    """Split user transcript for DTW. ``max_chars <= 0`` = split by sentence only."""
+    """Split user transcript for DTW. ``max_chars <= 0`` = punctuation boundaries only."""
     text = user_text.strip()
     if not text:
         return []
@@ -44,26 +45,27 @@ def _user_text_to_sentences(
         language = TextMatchingTask._detect_align_language(text)
 
     if max_chars <= 0:
-        # No length cap, but still split by sentence-ending punctuation so each
-        # sentence becomes its own subtitle instead of feeding whole paragraphs
-        # to DTW as one giant merged segment.
-        return _split_into_sentences(text)
+        # No length cap, but still honor author-provided punctuation/newline
+        # boundaries instead of feeding whole paragraphs to DTW as one segment.
+        return _split_into_sentences(text, include_soft_punctuation=True)
 
     if language == "en" and smart_split:
         return _split_english_by_words(text, max(max_chars, 50))
     return split_text_into_segments(text, max_chars=max_chars)
 
 
-def _split_into_sentences(text: str) -> list[str]:
-    """Split by newline then sentence-ending punctuation; never merge across sentences."""
-    import re
+def _split_into_sentences(text: str, include_soft_punctuation: bool = False) -> list[str]:
+    """Split by newline then punctuation; never merge across sentence boundaries."""
 
     sentences: list[str] = []
+    punctuation = r"([。！？.!?;；]+)"
+    if include_soft_punctuation:
+        punctuation = r"([。！？.!?;；，,、：:]+|—+|–+|-{2,}|…+)"
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
-        parts = re.split(r"([。！？.!?;；])", line)
+        parts = re.split(punctuation, line)
         for i in range(0, len(parts), 2):
             chunk = parts[i]
             punct = parts[i + 1] if i + 1 < len(parts) else ""
@@ -91,9 +93,8 @@ def align_text_to_asr(
 
     Returns:
         A new :class:`ASRData` whose segments carry the user's text on the
-        ASR's timeline (millisecond timings). Sentence punctuation is kept
-        during DTW alignment for accurate splitting, then stripped from the
-        final subtitle text (ASCII apostrophe ``'`` preserved).
+        ASR's timeline (millisecond timings). Punctuation is ignored for DTW
+        matching and stripped from the final subtitle text.
     """
     recognized = [
         {"start": seg.start_time / 1000.0, "end": seg.end_time / 1000.0, "text": seg.text}
@@ -105,12 +106,12 @@ def align_text_to_asr(
     aligned = align_texts(recognized, user_sentences, allow_pause_split=(max_chars > 0))
     new_segments = [
         ASRDataSeg(
-            text=strip_subtitle_punctuation(s["text"].strip(), language),
-            start_time=int(round(s["start"] * 1000)),
-            end_time=int(round(s["end"] * 1000)),
+            text=strip_subtitle_punctuation(segment["text"].strip(), language),
+            start_time=int(round(segment["start"] * 1000)),
+            end_time=int(round(segment["end"] * 1000)),
         )
-        for s in aligned
-        if strip_subtitle_punctuation(s["text"].strip(), language)
+        for segment in aligned
+        if strip_subtitle_punctuation(segment["text"].strip(), language)
     ]
     return ASRData(new_segments)
 

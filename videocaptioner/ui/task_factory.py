@@ -203,6 +203,7 @@ class TaskFactory:
             # 字幕翻译
             target_language=cfg.target_language.value,
             # 字幕提示
+            translation_prompt_text=cfg.translation_prompt_text.value,
             custom_prompt_text=cfg.custom_prompt_text.value,
         )
 

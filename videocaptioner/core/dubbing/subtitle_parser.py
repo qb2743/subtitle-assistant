@@ -10,7 +10,6 @@ from videocaptioner.core.asr.asr_data import ASRData
 from .models import DubbingSegment
 
 _BRACKET_SPEAKER_RE = re.compile(r"^\s*[\[\(【](?P<speaker>[^\]\)】]{1,40})[\]\)】]\s*(?P<text>.+)$", re.S)
-_COLON_SPEAKER_RE = re.compile(r"^\s*(?P<speaker>[\w\u4e00-\u9fff ._-]{1,40})\s*[:：]\s*(?P<text>.+)$", re.S)
 
 
 def load_dubbing_segments(path: str, *, text_track: str = "auto") -> list[DubbingSegment]:
@@ -19,7 +18,6 @@ def load_dubbing_segments(path: str, *, text_track: str = "auto") -> list[Dubbin
     Speaker label formats for plain subtitle files:
 
     - ``[Alice] Hello``
-    - ``Alice: Hello``
     - ``【小明】你好``
 
     JSON input may be either an array or a dict keyed by subtitle number. Fields:
@@ -51,13 +49,12 @@ def load_dubbing_segments(path: str, *, text_track: str = "auto") -> list[Dubbin
 def split_speaker(text: str) -> tuple[str, str]:
     """Extract speaker name from a subtitle line."""
     cleaned = text.strip()
-    for pattern in (_BRACKET_SPEAKER_RE, _COLON_SPEAKER_RE):
-        match = pattern.match(cleaned)
-        if match:
-            speaker = match.group("speaker").strip()
-            content = match.group("text").strip()
-            if speaker and content:
-                return speaker, content
+    match = _BRACKET_SPEAKER_RE.match(cleaned)
+    if match:
+        speaker = match.group("speaker").strip()
+        content = match.group("text").strip()
+        if speaker and content:
+            return speaker, content
     return "default", cleaned
 
 

@@ -122,6 +122,16 @@ def test_request_voice_overrides_default(tmp_path):
     assert _FakeConvert.last_kwargs["voice_id"] == "override-voice-id"
 
 
+def test_text_with_time_is_sent_unchanged(tmp_path):
+    text = "By 6:13 PM that same evening"
+
+    ElevenLabsSpeechSynthesizer(_make_config()).synthesize(
+        SynthesisRequest(text=text, output_path=str(tmp_path / "line.wav"))
+    )
+
+    assert _FakeConvert.last_kwargs["text"] == text
+
+
 def test_factory_returns_elevenlabs_synthesizer():
     synth = create_speech_synthesizer(_make_config())
     assert isinstance(synth, ElevenLabsSpeechSynthesizer)

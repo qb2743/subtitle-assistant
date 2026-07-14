@@ -56,6 +56,7 @@ def create_translator_from_config(
         target_language=config.target_language,
         model=config.llm_model or "",
         custom_prompt=custom_prompt,
+        translation_prompt=config.translation_prompt_text or "",
         is_reflect=config.need_reflect,
         update_callback=callback,
         translation_mode=config.translation_mode,

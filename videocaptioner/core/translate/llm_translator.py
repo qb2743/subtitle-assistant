@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from string import Template
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import json_repair
@@ -35,6 +36,7 @@ class LLMTranslator(BaseTranslator):
         custom_prompt: str,
         is_reflect: bool,
         update_callback: Optional[Callable],
+        translation_prompt: str = "",
         translation_mode: str = "auto",
     ):
         super().__init__(
@@ -46,6 +48,7 @@ class LLMTranslator(BaseTranslator):
 
         self.model = model
         self.custom_prompt = custom_prompt
+        self.translation_prompt = translation_prompt
         self.is_reflect = is_reflect
         self.translation_mode = translation_mode
 
@@ -256,17 +259,48 @@ class LLMTranslator(BaseTranslator):
         return subtitle_data
 
     def _get_translation_prompt(self) -> str:
+        if self.translation_prompt.strip():
+            return self._with_runtime_context(
+                self._render_prompt_template(self.translation_prompt)
+            )
         if self.is_reflect:
-            return get_prompt(
-                "translate/reflect",
-                target_language=self.target_language,
+            return self._with_runtime_context(
+                get_prompt(
+                    "translate/reflect",
+                    target_language=self._target_language_text(),
+                    custom_prompt=self.custom_prompt,
+                )
+            )
+        return self._with_runtime_context(
+            get_prompt(
+                "translate/standard",
+                target_language=self._target_language_text(),
                 custom_prompt=self.custom_prompt,
             )
-        return get_prompt(
-            "translate/standard",
-            target_language=self.target_language,
+        )
+
+    def _render_prompt_template(self, prompt: str) -> str:
+        template = Template(prompt)
+        return template.safe_substitute(
+            target_language=self._target_language_text(),
             custom_prompt=self.custom_prompt,
         )
+
+    def _target_language_text(self) -> str:
+        return str(getattr(self.target_language, "value", self.target_language))
+
+    def _with_runtime_context(self, prompt: str) -> str:
+        target = self._target_language_text()
+        context = (
+            "<runtime_translation_context>\n"
+            f"Target language: {target}\n"
+            "This target language is authoritative even if the editable prompt omits its variable.\n"
+        )
+        custom_prompt = self.custom_prompt.strip()
+        if custom_prompt:
+            context += f"User terminology and requirements:\n{custom_prompt}\n"
+        context += "</runtime_translation_context>"
+        return f"{context}\n\n{prompt.strip()}"
 
     def _get_full_context_prompt(self) -> str:
         prompt = self._get_translation_prompt()
@@ -393,9 +427,7 @@ class LLMTranslator(BaseTranslator):
         self, subtitle_chunk: List[SubtitleProcessData]
     ) -> List[SubtitleProcessData]:
         """Translate rows one by one as a repair path."""
-        single_prompt = get_prompt(
-            "translate/single", target_language=self.target_language
-        )
+        single_prompt = self._with_runtime_context(get_prompt("translate/single"))
 
         for data in subtitle_chunk:
             try:
@@ -476,7 +508,8 @@ class LLMTranslator(BaseTranslator):
         chunk_key = generate_cache_key(chunk)
         lang = self.target_language.value
         model = self.model
-        return f"{class_name}:chunk:{chunk_key}:{lang}:{model}"
+        prompt_hash = self._prompt_hash()
+        return f"{class_name}:chunk:{prompt_hash}:{chunk_key}:{lang}:{model}"
 
     def _get_full_context_cache_key(self, chunk: List[SubtitleProcessData]) -> str:
         """Generate full-context cache key."""
@@ -485,5 +518,9 @@ class LLMTranslator(BaseTranslator):
         lang = self.target_language.value
         model = self.model
         prompt_mode = "reflect" if self.is_reflect else "standard"
-        prompt_hash = hashlib.sha256(self.custom_prompt.encode()).hexdigest()
+        prompt_hash = self._prompt_hash()
         return f"{class_name}:full-context-index-json:{prompt_mode}:{prompt_hash}:{chunk_key}:{lang}:{model}"
+
+    def _prompt_hash(self) -> str:
+        raw = f"{self.custom_prompt}\0{self.translation_prompt}"
+        return hashlib.sha256(raw.encode()).hexdigest()

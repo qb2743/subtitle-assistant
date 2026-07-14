@@ -15,11 +15,32 @@ def test_split_speaker_chinese_bracket_format():
     assert text == "你好，今天开始测试。"
 
 
-def test_split_speaker_colon_format():
+def test_split_speaker_keeps_colon_text_as_script():
     speaker, text = split_speaker("Bob: This is a line.")
 
-    assert speaker == "Bob"
-    assert text == "This is a line."
+    assert speaker == "default"
+    assert text == "Bob: This is a line."
+
+
+def test_split_speaker_keeps_colon_text_without_space_as_script():
+    speaker, text = split_speaker("Bob:This is a line.")
+
+    assert speaker == "default"
+    assert text == "Bob:This is a line."
+
+
+def test_split_speaker_does_not_treat_inline_time_as_speaker():
+    speaker, text = split_speaker("By 6:13 PM that same evening")
+
+    assert speaker == "default"
+    assert text == "By 6:13 PM that same evening"
+
+
+def test_split_speaker_does_not_treat_spaced_inline_time_as_speaker():
+    speaker, text = split_speaker("By 6: 13 PM that same evening")
+
+    assert speaker == "default"
+    assert text == "By 6: 13 PM that same evening"
 
 
 def test_split_speaker_default():

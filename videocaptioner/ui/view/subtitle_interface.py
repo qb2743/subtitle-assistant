@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ from qfluentwidgets import (
     ProgressBar,
     PushButton,
     RoundMenu,
+    SegmentedWidget,
     TableView,
     TextEdit,
     TransparentDropDownPushButton,
@@ -48,6 +50,7 @@ from videocaptioner.core.entities import (
     SubtitleTask,
     SupportedSubtitleFormats,
 )
+from videocaptioner.core.prompts import get_prompt
 from videocaptioner.core.subtitle import get_subtitle_style
 from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.core.utils.platform_utils import open_folder, reveal_in_explorer
@@ -201,6 +204,7 @@ class SubtitleInterface(QWidget):
         self.setAcceptDrops(True)
         self.task: Optional[SubtitleTask] = None
         self.subtitle_path: Optional[str] = None
+        self.translation_prompt_text: str = cfg.translation_prompt_text.value
         self.custom_prompt_text: str = cfg.custom_prompt_text.value
         self.setAttribute(Qt.WA_DeleteOnClose)  # type: ignore
         self._init_ui()
@@ -441,11 +445,12 @@ class SubtitleInterface(QWidget):
     def show_prompt_dialog(self) -> None:
         dialog = PromptDialog(self)
         if dialog.exec_():
+            self.translation_prompt_text = cfg.translation_prompt_text.value
             self.custom_prompt_text = cfg.custom_prompt_text.value
             self._update_prompt_button_style()
 
     def _update_prompt_button_style(self) -> None:
-        if self.custom_prompt_text.strip():
+        if self.custom_prompt_text.strip() or self.translation_prompt_text.strip():
             green_icon = FIF.DOCUMENT.colored(
                 QColor(76, 255, 165), QColor(76, 255, 165)
             )
@@ -497,6 +502,9 @@ class SubtitleInterface(QWidget):
             self.start_button.setEnabled(True)
             self.cancel_button.hide()
             return
+        if self.task.subtitle_config:
+            self.task.subtitle_config.translation_prompt_text = cfg.translation_prompt_text.value
+            self.task.subtitle_config.custom_prompt_text = self.custom_prompt_text
         self.subtitle_optimization_thread = SubtitleThread(self.task)
         self.subtitle_optimization_thread.finished.connect(
             self.on_subtitle_optimization_finished
@@ -1021,17 +1029,35 @@ class SubtitleInterface(QWidget):
 class PromptDialog(MessageBoxBase):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.default_translation_prompt = self._default_translation_prompt()
         self.setup_ui()
-        self.setWindowTitle(self.tr("文稿提示"))
+        self.setWindowTitle(self.tr("Prompt"))
         # 连接按钮点击事件
         self.yesButton.clicked.connect(self.save_prompt)
 
     def setup_ui(self) -> None:
-        self.titleLabel = BodyLabel(self.tr("文稿提示"), self)
+        self.titleLabel = BodyLabel(self.tr("提示词设置"), self)
+        self.widget.setMinimumSize(780, 620)
+
+        self.translation_prompt_label = BodyLabel(self.tr("翻译系统提示词模板"), self)
+        self.translation_prompt_edit = TextEdit(self)
+        self.translation_prompt_edit.setPlaceholderText(
+            self.tr(
+                "用于 LLM 字幕翻译的系统提示词（Bing/Google/DeepLX 不使用此提示词）。\n"
+                "目标语言和下方文稿提示会在运行时自动注入；变量 ${target_language} / ${custom_prompt} 可保留，也可以删除。"
+            )
+        )
+        self.translation_prompt_edit.setText(
+            cfg.translation_prompt_text.value or self.default_translation_prompt
+        )
+        self.translation_prompt_edit.setMinimumWidth(640)
+        self.translation_prompt_edit.setMinimumHeight(420)
+
+        self.custom_prompt_label = BodyLabel(self.tr("文稿提示 / 术语表"), self)
 
         # 添加文本编辑框
-        self.text_edit = TextEdit(self)
-        self.text_edit.setPlaceholderText(
+        self.custom_prompt_edit = TextEdit(self)
+        self.custom_prompt_edit.setPlaceholderText(
             self.tr(
                 "请输入文稿提示（辅助校正字幕和翻译）\n\n"
                 "支持以下内容:\n"
@@ -1044,14 +1070,42 @@ class PromptDialog(MessageBoxBase):
                 "注意: 使用小型LLM模型时建议控制文稿在1千字内。对于不同字幕文件,请使用与该字幕相关的文稿提示。"
             )
         )
-        self.text_edit.setText(cfg.custom_prompt_text.value)
+        self.custom_prompt_edit.setText(cfg.custom_prompt_text.value)
 
-        self.text_edit.setMinimumWidth(420)
-        self.text_edit.setMinimumHeight(380)
+        self.custom_prompt_edit.setMinimumWidth(640)
+        self.custom_prompt_edit.setMinimumHeight(420)
+
+        self.prompt_pivot = SegmentedWidget(self)
+        self.prompt_stack = QStackedWidget(self)
+        self.prompt_stack.setMinimumWidth(700)
+        self.prompt_stack.setMinimumHeight(500)
+        self.prompt_stack.setStyleSheet("QStackedWidget { background: transparent; }")
+
+        translation_tab = self._build_prompt_tab(
+            self.translation_prompt_label, self.translation_prompt_edit
+        )
+        custom_tab = self._build_prompt_tab(
+            self.custom_prompt_label, self.custom_prompt_edit
+        )
+        self.prompt_stack.addWidget(translation_tab)
+        self.prompt_stack.addWidget(custom_tab)
+
+        self.prompt_pivot.addItem(
+            routeKey="translationPrompt",
+            text=self.tr("翻译系统提示词"),
+            onClick=lambda: self.prompt_stack.setCurrentWidget(translation_tab),
+        )
+        self.prompt_pivot.addItem(
+            routeKey="customPrompt",
+            text=self.tr("文稿提示"),
+            onClick=lambda: self.prompt_stack.setCurrentWidget(custom_tab),
+        )
+        self.prompt_pivot.setCurrentItem("translationPrompt")
 
         # 添加到布局
         self.viewLayout.addWidget(self.titleLabel)
-        self.viewLayout.addWidget(self.text_edit)
+        self.viewLayout.addWidget(self.prompt_pivot)
+        self.viewLayout.addWidget(self.prompt_stack)
         self.viewLayout.setSpacing(10)
 
         # 设置按钮文本
@@ -1059,12 +1113,30 @@ class PromptDialog(MessageBoxBase):
         self.cancelButton.setText(self.tr("取消"))
 
     def get_prompt(self) -> str:
-        return self.text_edit.toPlainText()
+        return self.custom_prompt_edit.toPlainText()
+
+    def _build_prompt_tab(self, label: BodyLabel, editor: TextEdit) -> QWidget:
+        tab = QWidget(self)
+        tab.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(label)
+        layout.addWidget(editor)
+        return tab
 
     def save_prompt(self) -> None:
         # 在点击确定按钮时保存提示文本到配置
-        prompt_text = self.text_edit.toPlainText()
-        cfg.set(cfg.custom_prompt_text, prompt_text)
+        translation_prompt = self.translation_prompt_edit.toPlainText()
+        if translation_prompt.strip() == self.default_translation_prompt.strip():
+            translation_prompt = ""
+        cfg.set(cfg.translation_prompt_text, translation_prompt)
+        cfg.set(cfg.custom_prompt_text, self.custom_prompt_edit.toPlainText())
+
+    @staticmethod
+    def _default_translation_prompt() -> str:
+        prompt_path = "translate/reflect" if cfg.need_reflect_translate.value else "translate/standard"
+        return get_prompt(prompt_path)
 
 
 if __name__ == "__main__":

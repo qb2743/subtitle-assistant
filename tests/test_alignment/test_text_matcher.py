@@ -39,9 +39,8 @@ def test_align_text_to_asr_produces_srt():
     assert "-->" in srt
 
 
-def test_align_text_to_asr_preserves_punctuation():
-    # Punctuation guides DTW splitting but is stripped from the final subtitle
-    # text (only ASCII apostrophe ' survives).
+def test_align_text_to_asr_strips_punctuation_when_length_limited():
+    # Punctuation guides DTW splitting but is stripped from the final subtitle.
     asr = ASRData([ASRDataSeg(text="你好世界", start_time=0, end_time=2000)])
     aligned = align_text_to_asr(asr, "你好，世界！", max_chars=30)
     assert aligned.segments[0].text == "你好世界"
@@ -76,16 +75,22 @@ def test_align_text_to_asr_auto_language_keeps_english_words_intact():
     assert all(len(word) > 1 for seg in aligned.segments for word in seg.text.split())
 
 
-
-    # max_chars=0 means no length cap, but paragraphs still split by sentence.
+def test_align_text_to_asr_max_chars_zero_splits_sentences_and_strips_punctuation():
+    # max_chars=0 means no length cap, but paragraphs still split by punctuation.
     asr = ASRData(
         [
             ASRDataSeg(text="你好世界今天天气真好我们去公园", start_time=0, end_time=6000),
         ]
     )
     aligned = align_text_to_asr(asr, "你好世界。今天天气真好！我们去公园！", max_chars=0)
-    assert len(aligned.segments) == 3
-    # Punctuation used for splitting is stripped from the displayed text.
-    assert aligned.segments[0].text == "你好世界"
-    assert aligned.segments[1].text == "今天天气真好"
-    assert aligned.segments[2].text == "我们去公园"
+    assert [seg.text for seg in aligned.segments] == ["你好世界", "今天天气真好", "我们去公园"]
+
+
+def test_align_text_to_asr_max_chars_zero_uses_comma_and_dash_boundaries():
+    asr = ASRData(
+        [
+            ASRDataSeg(text="你好世界今天出发然后回家最后确认", start_time=0, end_time=7000),
+        ]
+    )
+    aligned = align_text_to_asr(asr, "你好，世界——今天出发，然后回家--最后确认。", max_chars=0)
+    assert [seg.text for seg in aligned.segments] == ["你好", "世界", "今天出发", "然后回家", "最后确认"]

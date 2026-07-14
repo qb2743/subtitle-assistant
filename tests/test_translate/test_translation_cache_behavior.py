@@ -46,7 +46,7 @@ def make_asr_data() -> ASRData:
     )
 
 
-def make_translator(cache: MemoryCache) -> LLMTranslator:
+def make_translator(cache: MemoryCache, translation_prompt: str = "") -> LLMTranslator:
     translator = LLMTranslator(
         thread_num=1,
         batch_num=2,
@@ -55,6 +55,7 @@ def make_translator(cache: MemoryCache) -> LLMTranslator:
         custom_prompt="",
         is_reflect=False,
         update_callback=None,
+        translation_prompt=translation_prompt,
     )
     translator._cache = cache
     return translator
@@ -139,3 +140,36 @@ def test_disabled_cache_bypasses_full_context_cache(monkeypatch):
         "fresh 2",
         "fresh 3",
     ]
+
+
+def test_custom_translation_prompt_renders_template_variables():
+    translator = make_translator(
+        MemoryCache(),
+        translation_prompt="Translate into ${target_language}. Notes: ${custom_prompt}",
+    )
+    translator.custom_prompt = "keep NASA"
+
+    prompt = translator._get_translation_prompt()
+    assert "Target language: 简体中文" in prompt
+    assert "Translate into 简体中文. Notes: keep NASA" in prompt
+
+
+def test_custom_translation_prompt_gets_target_language_even_without_variable():
+    translator = make_translator(
+        MemoryCache(),
+        translation_prompt="Translate naturally.",
+    )
+    translator.custom_prompt = "keep NASA"
+
+    prompt = translator._get_translation_prompt()
+    assert "Target language: 简体中文" in prompt
+    assert "User terminology and requirements:\nkeep NASA" in prompt
+    assert "Translate naturally." in prompt
+
+
+def test_translation_prompt_changes_full_context_cache_key():
+    data = make_translate_data()
+    key_a = make_translator(MemoryCache(), translation_prompt="prompt A")._get_full_context_cache_key(data)
+    key_b = make_translator(MemoryCache(), translation_prompt="prompt B")._get_full_context_cache_key(data)
+
+    assert key_a != key_b

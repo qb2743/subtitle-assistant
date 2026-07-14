@@ -40,10 +40,11 @@ def test_align_command_produces_corrected_srt(tmp_path):
     assert rc == 0
     assert out_path.exists()
     content = out_path.read_text(encoding="utf-8")
-    # The user's correct text (with punctuation) replaces the ASR text.
-    assert "大家好，今天给大家介绍一款软件。" in content
-    assert "这个软件可以自动生成字幕。" in content
-    assert "并且支持多语言翻译和配音。" in content
+    # The user's correct text replaces the ASR text; punctuation is only a split
+    # hint and is stripped from displayed subtitles.
+    assert "大家好今天给大家介绍一款软件" in content
+    assert "这个软件可以自动生成字幕" in content
+    assert "并且支持多语言翻译和配音" in content
     assert "-->" in content
     assert content.strip().count("-->") == 3
 
@@ -58,7 +59,7 @@ def test_align_command_reads_text_file(tmp_path):
     rc = run(_args(subtitle=str(srt_path), text_file=str(text_path), output=str(out_path)), {})
 
     assert rc == 0
-    assert "大家好，今天给大家介绍一款软件。" in out_path.read_text(encoding="utf-8")
+    assert "大家好今天给大家介绍一款软件" in out_path.read_text(encoding="utf-8")
 
 
 def test_align_command_missing_subtitle(tmp_path):

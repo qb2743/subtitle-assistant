@@ -247,6 +247,7 @@ class Config(QConfig):
     max_word_count_english = ConfigItem(
         "Subtitle", "MaxWordCountEnglish", 20, RangeValidator(8, 100)
     )
+    translation_prompt_text = ConfigItem("Subtitle", "TranslationPromptText", "")
     custom_prompt_text = ConfigItem("Subtitle", "CustomPromptText", "")
 
     # ------------------- 配音配置 -------------------

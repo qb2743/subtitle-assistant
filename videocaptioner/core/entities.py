@@ -647,6 +647,7 @@ class SubtitleConfig:
     need_split: bool = True
     target_language: Optional["TargetLanguage"] = None
     subtitle_style: Optional[str] = None
+    translation_prompt_text: Optional[str] = None
     custom_prompt_text: Optional[str] = None
 
     def _mask_key(self, key: Optional[str]) -> str:
@@ -675,6 +676,8 @@ class SubtitleConfig:
             lines.append(
                 f"  Service: {self.translator_service.value if self.translator_service else 'None'}"
             )
+            if self.translation_prompt_text:
+                lines.append(f"  Translation Prompt: {self.translation_prompt_text[:30]}...")
             if self.translator_service == TranslatorServiceEnum.OPENAI:
                 lines.append(f"  API Base: {self.base_url}")
                 lines.append(f"  API Key: {self._mask_key(self.api_key)}")

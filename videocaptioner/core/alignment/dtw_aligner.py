@@ -30,12 +30,12 @@ from videocaptioner.core.utils.logger import setup_logger
 logger = setup_logger("alignment.dtw")
 
 # CJK + ASCII punctuation and whitespace stripped before char-level matching.
-_PUNCTUATION = set("。，！？；：、,.!?;: 　「」『』“”‘’（）()【】[]")
+_PUNCTUATION = set("。，！？；：、,.!?;: 　「」『』“”‘’（）()【】[]\"\"…—–·《》〈〉-")
 
 # Punctuation removed from final subtitle text (ASCII apostrophe ' and spaces kept;
 # curly quotes ‘ ’ “ ” are stripped — English normalizes ’ to ' first so it survives).
 _SUBTITLE_STRIP_PUNCT = set(
-    "。，！？；：、,.!?;:　「」『』“”‘’（）()【】[]\"\"…—–·《》〈〉"
+    "。，！？；：、,.!?;:　「」『』“”‘’（）()【】[]\"\"…—–·《》〈〉-"
 )
 
 
@@ -286,7 +286,14 @@ def match_user_text_to_timestamps(
         end_time = _char_end_time(e - 1)
         if end_time - start_time < 0.5:
             end_time = start_time + 0.5
-        text = user_text_full[orig_positions[s] : orig_positions[e - 1] + 1]
+        start_pos = orig_positions[s]
+        end_pos = orig_positions[e - 1] + 1
+        next_pos = orig_positions[e] if e < n_user else len(user_text_full)
+        while end_pos < next_pos and (
+            not user_text_full[end_pos].strip() or user_text_full[end_pos] in _PUNCTUATION
+        ):
+            end_pos += 1
+        text = user_text_full[start_pos:end_pos]
         if text.strip():
             out.append({"start": start_time, "end": end_time, "text": text})
 

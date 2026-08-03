@@ -159,10 +159,11 @@ class DubbingPipeline:
                     source_audio = work / "source_audio.wav"
                     self._extract_video_audio(video_path, source_audio)
                     cb(5, "separating vocals and background")
+                    # 分离器内部 0-100 进度映射到流水线 4-7 区间,保持 UI 进度单调。
                     _vocal, instrument_path = separate_vocals(
                         str(source_audio),
                         str(work),
-                        progress=cb,
+                        progress=lambda p, s: cb(4 + int(p) * 3 // 100, s),
                     )
                     logger.info("分离人声/背景声完成: %s", instrument_path)
                 except Exception as exc:
@@ -288,7 +289,7 @@ class DubbingPipeline:
         if self.config.embed_bgm and (
             instrument_path or self.config.extra_bgm_path
         ):
-            cb(92, "mixing background audio")
+            cb(89, "mixing background audio")
             try:
                 mixed = work / "dubbed_bgm.wav"
                 mix_background(

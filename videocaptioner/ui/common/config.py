@@ -278,6 +278,20 @@ class Config(QConfig):
     dubbing_embed_subtitle = OptionsConfigItem(
         "Dubbing", "EmbedSubtitle", "none", OptionsValidator(["none", "hard"])
     )
+    # 分离人声/背景声：从视频中分离人声与背景（需选择视频；首次使用需下载约170MB模型）
+    dubbing_separate_vocal = ConfigItem(
+        "Dubbing", "SeparateVocal", False, BoolValidator()
+    )
+    # 重新嵌入背景声：把分离出的背景音混回配音
+    dubbing_embed_bgm = ConfigItem("Dubbing", "EmbedBgm", False, BoolValidator())
+    # 背景音短时循环：背景音短于配音时循环补齐
+    dubbing_bgm_loop = ConfigItem("Dubbing", "BgmLoop", True, BoolValidator())
+    # 背景音量(0-1)
+    dubbing_bgm_volume = RangeConfigItem(
+        "Dubbing", "BgmVolume", 0.8, RangeValidator(0.0, 1.0)
+    )
+    # 额外背景音频路径
+    dubbing_extra_bgm_path = ConfigItem("Dubbing", "ExtraBgmPath", "")
     dubbing_api_key = ConfigItem("Dubbing", "ApiKey", "")
     dubbing_api_key_elevenlabs = ConfigItem("Dubbing", "ApiKeyElevenLabs", "")
     dubbing_api_key_siliconflow = ConfigItem("Dubbing", "ApiKeySiliconFlow", "")

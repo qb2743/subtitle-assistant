@@ -642,6 +642,78 @@ class DubbingInterface(QWidget):
         embed_layout.addStretch()
         params_layout.addLayout(embed_layout)
 
+        # 背景音
+        bgm_title = BodyLabel("背景音", self)
+        params_layout.addWidget(bgm_title)
+
+        # 分离人声/背景声
+        separate_layout = QHBoxLayout()
+        separate_layout.addWidget(BodyLabel("分离人声背景声:", self))
+        self.separate_vocal_switch = SwitchButton(self)
+        self.separate_vocal_switch.setToolTip(
+            "从视频中分离人声与背景，需选择视频；首次使用需下载约170MB模型"
+        )
+        separate_layout.addWidget(self.separate_vocal_switch)
+        separate_layout.addStretch()
+        params_layout.addLayout(separate_layout)
+
+        # 重新嵌入背景声
+        embed_bgm_layout = QHBoxLayout()
+        embed_bgm_layout.addWidget(BodyLabel("重新嵌入背景声:", self))
+        self.embed_bgm_switch = SwitchButton(self)
+        self.embed_bgm_switch.setToolTip("把分离出的背景音混回配音")
+        self.embed_bgm_switch.checkedChanged.connect(self._on_embed_bgm_toggled)
+        embed_bgm_layout.addWidget(self.embed_bgm_switch)
+        embed_bgm_layout.addStretch()
+        params_layout.addLayout(embed_bgm_layout)
+
+        # 背景音短时循环
+        loop_layout = QHBoxLayout()
+        loop_layout.addWidget(BodyLabel("背景音短时循环:", self))
+        self.bgm_loop_switch = SwitchButton(self)
+        self.bgm_loop_switch.setChecked(True)
+        self.bgm_loop_switch.setToolTip("背景音短于配音时循环补齐")
+        loop_layout.addWidget(self.bgm_loop_switch)
+        loop_layout.addStretch()
+        params_layout.addLayout(loop_layout)
+
+        # 背景音量
+        bgm_vol_layout = QHBoxLayout()
+        bgm_vol_layout.addWidget(BodyLabel("背景音量:", self))
+        self.bgm_volume_slider = Slider(Qt.Horizontal, self)
+        self.bgm_volume_slider.setRange(0, 100)  # 0.0-1.0
+        self.bgm_volume_slider.setValue(80)  # 默认 0.8
+        self.bgm_volume_slider.setFixedWidth(180)
+        self.bgm_volume_slider.valueChanged.connect(self._on_bgm_volume_slider_changed)
+        bgm_vol_layout.addWidget(self.bgm_volume_slider)
+        self.bgm_volume_spin = DoubleSpinBox(self)
+        self.bgm_volume_spin.setRange(0.0, 1.0)
+        self.bgm_volume_spin.setValue(0.8)
+        self.bgm_volume_spin.setSingleStep(0.05)
+        self.bgm_volume_spin.setDecimals(2)
+        self.bgm_volume_spin.setFixedWidth(140)
+        self.bgm_volume_spin.valueChanged.connect(self._on_bgm_volume_spin_changed)
+        bgm_vol_layout.addWidget(self.bgm_volume_spin)
+        bgm_vol_layout.addStretch()
+        params_layout.addLayout(bgm_vol_layout)
+
+        # 额外背景音频
+        bgm_path_layout = QHBoxLayout()
+        bgm_path_layout.addWidget(BodyLabel("额外背景音频:", self))
+        self.extra_bgm_edit = LineEdit(self)
+        self.extra_bgm_edit.setPlaceholderText("选择背景音后无需分离视频")
+        self.extra_bgm_edit.setReadOnly(True)
+        bgm_path_layout.addWidget(self.extra_bgm_edit, 1)
+        self.extra_bgm_browse_btn = ToolButton(FIF.FOLDER, self)
+        self.extra_bgm_browse_btn.setToolTip("选择背景音频文件")
+        self.extra_bgm_browse_btn.clicked.connect(self._select_extra_bgm)
+        bgm_path_layout.addWidget(self.extra_bgm_browse_btn)
+        self.extra_bgm_clear_btn = ToolButton(FIF.DELETE, self)
+        self.extra_bgm_clear_btn.setToolTip("清除背景音频")
+        self.extra_bgm_clear_btn.clicked.connect(self._clear_extra_bgm)
+        bgm_path_layout.addWidget(self.extra_bgm_clear_btn)
+        params_layout.addLayout(bgm_path_layout)
+
         right_layout.addWidget(params_card)
 
         # API Key
@@ -835,6 +907,12 @@ class DubbingInterface(QWidget):
         self.video_autorate_switch.checkedChanged.connect(self._persist_dubbing_settings)
         self.gap_ms_spin.valueChanged.connect(self._persist_dubbing_settings)
         self.embed_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
+        self.separate_vocal_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.embed_bgm_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.bgm_loop_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.bgm_volume_slider.valueChanged.connect(self._persist_dubbing_settings)
+        self.bgm_volume_spin.valueChanged.connect(self._persist_dubbing_settings)
+        self.extra_bgm_edit.textChanged.connect(self._persist_dubbing_settings)
         self.model_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
         self.clone_audio_edit.textChanged.connect(self._persist_dubbing_settings)
         self.clone_text_edit.textChanged.connect(self._persist_dubbing_settings)
@@ -872,6 +950,11 @@ class DubbingInterface(QWidget):
         cfg.dubbing_embed_subtitle.value = (
             "hard" if embed_text == "烧录硬字幕" else "none"
         )
+        cfg.dubbing_separate_vocal.value = self.separate_vocal_switch.isChecked()
+        cfg.dubbing_embed_bgm.value = self.embed_bgm_switch.isChecked()
+        cfg.dubbing_bgm_loop.value = self.bgm_loop_switch.isChecked()
+        cfg.dubbing_bgm_volume.value = self.bgm_volume_spin.value()
+        cfg.dubbing_extra_bgm_path.value = self.extra_bgm_edit.text().strip()
         cfg.dubbing_api_base.value = self.api_base_edit.text()
         cfg.dubbing_clone_audio_path.value = self.clone_audio_edit.text().strip()
         cfg.dubbing_clone_audio_text.value = self.clone_text_edit.toPlainText().strip()
@@ -1114,6 +1197,11 @@ class DubbingInterface(QWidget):
         self.gap_ms_spin.setValue(int(cfg.dubbing_subtitle_gap_ms.value))
         embed_value = cfg.dubbing_embed_subtitle.value or "none"
         self.embed_combo.setCurrentIndex(1 if embed_value == "hard" else 0)
+        self.separate_vocal_switch.setChecked(cfg.dubbing_separate_vocal.value)
+        self.embed_bgm_switch.setChecked(cfg.dubbing_embed_bgm.value)
+        self.bgm_loop_switch.setChecked(cfg.dubbing_bgm_loop.value)
+        self.bgm_volume_spin.setValue(float(cfg.dubbing_bgm_volume.value))
+        self.extra_bgm_edit.setText(cfg.dubbing_extra_bgm_path.value or "")
         self._sync_api_key_display()
         self.api_base_edit.setText(cfg.dubbing_api_base.value)
         self.clone_audio_edit.setText(cfg.dubbing_clone_audio_path.value or "")
@@ -1168,6 +1256,10 @@ class DubbingInterface(QWidget):
                 parent=self,
             )
 
+    def _on_embed_bgm_toggled(self, checked):
+        """重新嵌入背景声开关切换：同步背景音循环/音量可用性。"""
+        self._update_param_controls_enabled()
+
     def _update_param_controls_enabled(self):
         """根据固定停顿开关，刷新时间策略 / 停顿时长可用性。
 
@@ -1210,6 +1302,24 @@ class DubbingInterface(QWidget):
             else "每条配音后插入静音，时间轴顺延；0=关闭"
         )
 
+        # 背景音：分离依赖视频；回嵌依赖视频或额外背景音频；循环/音量仅在回嵌开启时可用
+        has_video = bool(self.subtitle_input.get_video_path())
+        has_extra_bgm = bool(self.extra_bgm_edit.text().strip())
+        self.separate_vocal_switch.setEnabled(has_video)
+        self.separate_vocal_switch.setToolTip(
+            "" if has_video else "需先选择视频文件"
+        )
+        can_embed = has_video or has_extra_bgm
+        self.embed_bgm_switch.setEnabled(can_embed)
+        self.embed_bgm_switch.setToolTip(
+            "" if can_embed else "需先选择视频或填写额外背景音频"
+        )
+        embed_bgm_on = self.embed_bgm_switch.isChecked()
+        self.bgm_loop_switch.setEnabled(embed_bgm_on)
+        self.bgm_volume_slider.setEnabled(embed_bgm_on)
+        self.bgm_volume_spin.setEnabled(embed_bgm_on)
+        self.extra_bgm_clear_btn.setEnabled(has_extra_bgm)
+
     def _on_speed_slider_changed(self, value):
         """语速滑块变化 - 更新输入框"""
         speed = value / 100.0  # 50-200 -> 0.5-2.0
@@ -1227,6 +1337,37 @@ class DubbingInterface(QWidget):
     def _on_speed_reset(self):
         """重置语速为默认值 1.0x"""
         self.speed_spin.setValue(1.0)
+
+    def _on_bgm_volume_slider_changed(self, value):
+        """背景音量滑块变化 - 更新输入框"""
+        volume = value / 100.0  # 0-100 -> 0.0-1.0
+        self.bgm_volume_spin.blockSignals(True)  # 防止循环触发
+        self.bgm_volume_spin.setValue(volume)
+        self.bgm_volume_spin.blockSignals(False)
+
+    def _on_bgm_volume_spin_changed(self, value):
+        """背景音量输入框变化 - 更新滑块"""
+        slider_value = int(round(value * 100))  # 0.0-1.0 -> 0-100
+        self.bgm_volume_slider.blockSignals(True)  # 防止循环触发
+        self.bgm_volume_slider.setValue(slider_value)
+        self.bgm_volume_slider.blockSignals(False)
+
+    def _select_extra_bgm(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择背景音频",
+            "",
+            "音频文件 (*.mp3 *.wav *.m4a *.aac *.flac *.ogg);;所有文件 (*.*)",
+        )
+        if file_path:
+            self.extra_bgm_edit.setText(file_path)
+            self.extra_bgm_edit.setToolTip(file_path)
+            self._update_param_controls_enabled()
+
+    def _clear_extra_bgm(self):
+        self.extra_bgm_edit.clear()
+        self.extra_bgm_edit.setToolTip("")
+        self._update_param_controls_enabled()
 
     def _on_workers_slider_changed(self, value: int):
         self.workers_spin.blockSignals(True)

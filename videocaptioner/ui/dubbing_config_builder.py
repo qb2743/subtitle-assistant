@@ -239,4 +239,9 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         subtitle_gap_ms=int(cfg.dubbing_subtitle_gap_ms.value),
         video_autorate=bool(cfg.dubbing_video_autorate.value),
         embed_subtitle=(cfg.dubbing_embed_subtitle.value or "none"),
+        separate_vocal=bool(cfg.dubbing_separate_vocal.value),
+        embed_bgm=bool(cfg.dubbing_embed_bgm.value),
+        bgm_loop=bool(cfg.dubbing_bgm_loop.value),
+        bgm_volume=float(cfg.dubbing_bgm_volume.value),
+        extra_bgm_path=(cfg.dubbing_extra_bgm_path.value or ""),
     )

@@ -22,7 +22,13 @@ from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import TranscribeConfig, TranscribeModelEnum
 
 from .audio_boundary_snapper import snap_subtitles_to_audio_boundaries
-from .dtw_aligner import align_texts, split_text_into_segments, strip_subtitle_punctuation
+from .dtw_aligner import (
+    align_texts,
+    protect_decimal_numbers,
+    restore_decimal_numbers,
+    split_text_into_segments,
+    strip_subtitle_punctuation,
+)
 
 # Audio extensions that can be fed to ASR directly (no extraction needed).
 _AUDIO_EXTENSIONS = frozenset({"flac", "m4a", "mp3", "wav", "ogg", "opus", "aac", "wma"})
@@ -55,7 +61,11 @@ def _user_text_to_sentences(
 
 
 def _split_into_sentences(text: str, include_soft_punctuation: bool = False) -> list[str]:
-    """Split by newline then punctuation; never merge across sentence boundaries."""
+    """Split by newline then punctuation; never merge across sentence boundaries.
+
+    Decimal points inside numbers (``2.5``, ``13.5``) are never treated as
+    sentence boundaries — they are protected before the punctuation split.
+    """
 
     sentences: list[str] = []
     punctuation = r"([。！？.!?;；]+)"
@@ -65,11 +75,12 @@ def _split_into_sentences(text: str, include_soft_punctuation: bool = False) -> 
         line = line.strip()
         if not line:
             continue
-        parts = re.split(punctuation, line)
+        protected, store = protect_decimal_numbers(line)
+        parts = re.split(punctuation, protected)
         for i in range(0, len(parts), 2):
             chunk = parts[i]
             punct = parts[i + 1] if i + 1 < len(parts) else ""
-            seg = (chunk + punct).strip()
+            seg = restore_decimal_numbers((chunk + punct).strip(), store)
             if seg:
                 sentences.append(seg)
     return sentences if sentences else [text]

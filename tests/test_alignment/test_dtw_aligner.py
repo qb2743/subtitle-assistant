@@ -55,6 +55,48 @@ def test_split_text_respects_max_chars():
     assert all(len(s) <= 10 for s in segs)
 
 
+def test_split_text_keeps_decimal_numbers_intact():
+    # "2.5" must not be treated as a sentence-ending period.
+    segs = split_text_into_segments("About 2.5 kilometers from Tulum", max_chars=80)
+    assert segs == ["About 2.5 kilometers from Tulum"]
+    # Even under a tight length cap, the decimal stays whole (never "2." / "5 ").
+    tight = split_text_into_segments("About 2.5 kilometers from Tulum", max_chars=30)
+    joined = " ".join(tight)
+    assert "2.5" in joined
+    assert "2." not in joined.replace("2.5", "")
+    assert not any(s.strip().startswith("5 ") for s in tight)
+
+    segs = split_text_into_segments(
+        "The cave is 2.5 kilometers long and 13.5 meters deep.", max_chars=80
+    )
+    assert segs == ["The cave is 2.5 kilometers long and 13.5 meters deep."]
+
+    # Real sentence periods still split when over max_chars; decimals stay whole.
+    segs = split_text_into_segments(
+        "Version 1.0 was released in 2020. Next came 2.0.", max_chars=45
+    )
+    assert segs == ["Version 1.0 was released in 2020.", "Next came 2.0."]
+    assert "1.0" in segs[0] and "2.0" in segs[1]
+
+
+def test_strip_keeps_decimal_points():
+    from videocaptioner.core.alignment import strip_subtitle_punctuation
+
+    assert (
+        strip_subtitle_punctuation("About 2.5 kilometers from Tulum.")
+        == "About 2.5 kilometers from Tulum"
+    )
+    assert strip_subtitle_punctuation("He scored 3.14 points.") == "He scored 3.14 points"
+    # Non-decimal periods still stripped.
+    assert strip_subtitle_punctuation("Hello. World!") == "Hello World"
+
+
+def test_remove_punctuation_keeps_decimal_points():
+    assert remove_punctuation("About 2.5 kilometers") == "About2.5kilometers"
+    assert remove_punctuation("2.5") == "2.5"
+    assert remove_punctuation("Hello, world!") == "Helloworld"
+
+
 def test_match_aligns_identical_text():
     recognized = [
         {"start": 0.0, "end": 2.0, "text": "你好世界"},

@@ -74,6 +74,7 @@ class SubtitleInputCard(CardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.file_path = None
+        self.video_path = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -100,6 +101,30 @@ class SubtitleInputCard(CardWidget):
         self.select_btn = PushButton(FIF.DOCUMENT, "选择文件", self)
         self.select_btn.clicked.connect(self._select_file)
         layout.addWidget(self.select_btn, 0, Qt.AlignCenter)
+
+        # 视频文件（可选）：用于视频变速 / 硬字幕烧录
+        video_row = QHBoxLayout()
+        video_row.addWidget(BodyLabel("视频文件(可选):", self))
+        self.video_edit = LineEdit(self)
+        self.video_edit.setPlaceholderText("选择视频后启用视频变速 / 硬字幕")
+        self.video_edit.setReadOnly(True)
+        video_row.addWidget(self.video_edit, 1)
+        self.video_browse_btn = PushButton(FIF.FOLDER, "浏览", self)
+        self.video_browse_btn.clicked.connect(self._select_video_file)
+        video_row.addWidget(self.video_browse_btn)
+        layout.addLayout(video_row)
+
+    def _select_video_file(self):
+        filters = "视频文件 (*.mp4 *.mkv *.mov *.avi *.flv *.wmv *.ts *.m4v);;所有文件 (*.*)"
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择视频文件", "", filters)
+        if file_path:
+            self.video_path = file_path
+            self.video_edit.setText(Path(file_path).name)
+            self.video_edit.setToolTip(file_path)
+            self.fileSelected.emit(file_path)
+
+    def get_video_path(self) -> Optional[str]:
+        return getattr(self, "video_path", None)
 
     def _select_file(self):
         valid_formats = [f"*.{fmt.value}" for fmt in SupportedSubtitleFormats]
@@ -293,6 +318,9 @@ class DubbingInterface(QWidget):
 
         # 输入区域（字幕文件）
         self.subtitle_input = SubtitleInputCard(self)
+        self.subtitle_input.fileSelected.connect(
+            lambda _p: self._update_param_controls_enabled()
+        )
         left_layout.addWidget(self.subtitle_input)
 
         # 输入区域（文案文本）
@@ -579,6 +607,41 @@ class DubbingInterface(QWidget):
         workers_layout.addStretch()
         params_layout.addLayout(workers_layout)
 
+        # 对齐控制
+        align_title = BodyLabel("对齐控制", self)
+        params_layout.addWidget(align_title)
+
+        # 视频变速
+        rate_layout = QHBoxLayout()
+        self.video_autorate_switch = SwitchButton(self)
+        self.video_autorate_switch.setToolTip("音频超长时逐段减速画面，需先选择视频")
+        rate_layout.addWidget(BodyLabel("视频变速:", self))
+        rate_layout.addWidget(self.video_autorate_switch)
+        rate_layout.addStretch()
+        params_layout.addLayout(rate_layout)
+
+        # 语音间隔
+        gap_layout = QHBoxLayout()
+        gap_layout.addWidget(BodyLabel("语音间隔:", self))
+        self.gap_ms_spin = SpinBox(self)
+        self.gap_ms_spin.setRange(0, 2000)
+        self.gap_ms_spin.setValue(0)
+        self.gap_ms_spin.setSuffix(" ms")
+        self.gap_ms_spin.setToolTip("每条配音后插入静音，时间轴顺延；0=关闭")
+        gap_layout.addWidget(self.gap_ms_spin)
+        gap_layout.addStretch()
+        params_layout.addLayout(gap_layout)
+
+        # 嵌入硬字幕
+        embed_layout = QHBoxLayout()
+        embed_layout.addWidget(BodyLabel("嵌入硬字幕:", self))
+        self.embed_combo = ComboBox(self)
+        self.embed_combo.addItems(["无", "烧录硬字幕"])
+        self.embed_combo.setToolTip("烧录硬字幕需先选择视频")
+        embed_layout.addWidget(self.embed_combo)
+        embed_layout.addStretch()
+        params_layout.addLayout(embed_layout)
+
         right_layout.addWidget(params_card)
 
         # API Key
@@ -769,6 +832,9 @@ class DubbingInterface(QWidget):
         self.pause_ms_spin.valueChanged.connect(self._persist_dubbing_settings)
         self.speed_spin.valueChanged.connect(self._persist_dubbing_settings)
         self.workers_spin.valueChanged.connect(self._persist_dubbing_settings)
+        self.video_autorate_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.gap_ms_spin.valueChanged.connect(self._persist_dubbing_settings)
+        self.embed_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
         self.model_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
         self.clone_audio_edit.textChanged.connect(self._persist_dubbing_settings)
         self.clone_text_edit.textChanged.connect(self._persist_dubbing_settings)
@@ -800,6 +866,12 @@ class DubbingInterface(QWidget):
         cfg.dubbing_fixed_line_pause_ms.value = self.pause_ms_spin.value()
         cfg.dubbing_speed.value = self.speed_spin.value()
         cfg.dubbing_tts_workers.value = self.workers_spin.value()
+        cfg.dubbing_video_autorate.value = self.video_autorate_switch.isChecked()
+        cfg.dubbing_subtitle_gap_ms.value = self.gap_ms_spin.value()
+        embed_text = self.embed_combo.currentText()
+        cfg.dubbing_embed_subtitle.value = (
+            "hard" if embed_text == "烧录硬字幕" else "none"
+        )
         cfg.dubbing_api_base.value = self.api_base_edit.text()
         cfg.dubbing_clone_audio_path.value = self.clone_audio_edit.text().strip()
         cfg.dubbing_clone_audio_text.value = self.clone_text_edit.toPlainText().strip()
@@ -1038,6 +1110,10 @@ class DubbingInterface(QWidget):
         self.pause_ms_spin.setValue(cfg.dubbing_fixed_line_pause_ms.value)
         self.speed_spin.setValue(cfg.dubbing_speed.value)
         self.workers_spin.setValue(int(cfg.dubbing_tts_workers.value))
+        self.video_autorate_switch.setChecked(cfg.dubbing_video_autorate.value)
+        self.gap_ms_spin.setValue(int(cfg.dubbing_subtitle_gap_ms.value))
+        embed_value = cfg.dubbing_embed_subtitle.value or "none"
+        self.embed_combo.setCurrentIndex(1 if embed_value == "hard" else 0)
         self._sync_api_key_display()
         self.api_base_edit.setText(cfg.dubbing_api_base.value)
         self.clone_audio_edit.setText(cfg.dubbing_clone_audio_path.value or "")
@@ -1061,6 +1137,8 @@ class DubbingInterface(QWidget):
         self._on_provider_changed(self.provider_combo.currentText())
         if saved_voice:
             self._restore_voice_selection(saved_voice)
+        # 根据当前模式 / 固定停顿刷新参数控件可用性（默认是字幕模式）
+        self._update_param_controls_enabled()
         self._config_loading = False
 
     def save_config(self):
@@ -1068,21 +1146,20 @@ class DubbingInterface(QWidget):
         self._persist_dubbing_settings()
 
     def _on_mode_changed(self, checked):
-        """模式切换"""
+        """模式切换：切换输入区，并刷新参数区可编辑状态。"""
         if self.mode_subtitle.isChecked():
             self.subtitle_input.setVisible(True)
             self.text_input.setVisible(False)
-            self.timing_combo.setEnabled(True)
-            self.audio_mode_combo.setEnabled(True)
         else:
             self.subtitle_input.setVisible(False)
             self.text_input.setVisible(True)
-            self.timing_combo.setEnabled(False)
-            self.audio_mode_combo.setEnabled(False)
+        self._update_param_controls_enabled()
 
     def _on_pause_toggled(self, checked):
-        """固定停顿开关切换"""
-        if checked:
+        """固定停顿开关切换：同步时间策略可用性，并提示冲突。"""
+        self._update_param_controls_enabled()
+        # 加载配置时 setChecked 也会触发，避免启动时弹提示
+        if checked and not self._config_loading:
             InfoBar.warning(
                 title="提示",
                 content="开启固定停顿后，时间策略将失效",
@@ -1090,6 +1167,48 @@ class DubbingInterface(QWidget):
                 position=InfoBarPosition.TOP,
                 parent=self,
             )
+
+    def _update_param_controls_enabled(self):
+        """根据固定停顿开关，刷新时间策略 / 停顿时长可用性。
+
+        用户反馈：关掉固定停顿后应能调整时间策略与音频模式。
+        固定停顿开启时 pipeline 会忽略 SRT 时间轴，因此禁用时间策略；
+        音频模式与固定停顿无关，始终可调（配置会写入 cfg，供字幕/成片流程使用）。
+        """
+        fixed_pause = self.pause_switch.isChecked()
+
+        # 固定停顿开启 → 时间策略无效
+        self.timing_combo.setEnabled(not fixed_pause)
+        self.timing_combo.setToolTip(
+            "开启固定停顿后，时间策略将失效（行与行之间按固定间隔拼接）"
+            if fixed_pause
+            else ""
+        )
+
+        # 音频模式与固定停顿无关，始终允许调整
+        self.audio_mode_combo.setEnabled(True)
+        self.audio_mode_combo.setToolTip("")
+
+        # 停顿时长仅在固定停顿开启时有意义
+        self.pause_ms_spin.setEnabled(fixed_pause)
+
+        # 对齐控制：视频变速 / 硬字幕依赖视频输入；语音间隔与固定停顿互斥
+        has_video = bool(self.subtitle_input.get_video_path())
+        self.video_autorate_switch.setEnabled(has_video)
+        self.video_autorate_switch.setToolTip(
+            "" if has_video else "需先选择视频文件"
+        )
+        self.embed_combo.setEnabled(has_video)
+        self.embed_combo.setToolTip(
+            "" if has_video else "烧录硬字幕需先选择视频文件"
+        )
+        # 固定停顿开启时 pipeline 忽略 SRT 时间轴，语音间隔(顺延)随其失效
+        self.gap_ms_spin.setEnabled(not fixed_pause)
+        self.gap_ms_spin.setToolTip(
+            "开启固定停顿后，语音间隔将失效（行与行之间按固定间隔拼接）"
+            if fixed_pause
+            else "每条配音后插入静音，时间轴顺延；0=关闭"
+        )
 
     def _on_speed_slider_changed(self, value):
         """语速滑块变化 - 更新输入框"""
@@ -2205,10 +2324,12 @@ class DubbingInterface(QWidget):
         self.status_label.setText("准备中...")
 
         # 创建工作线程
+        video_path = self.subtitle_input.get_video_path() or None
         self.worker_thread = DubbingInterfaceThread(
             input_mode=input_mode,
             input_data=input_data,
             output_path=self.output_edit.text() or None,
+            video_path=video_path,
         )
 
         # 连接信号

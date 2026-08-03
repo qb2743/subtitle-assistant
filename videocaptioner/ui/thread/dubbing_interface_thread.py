@@ -1,9 +1,11 @@
 """配音界面后台线程 - 支持字幕文件和文案直接配音"""
 
+from datetime import datetime
 from pathlib import Path
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from videocaptioner.config import WORK_PATH
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.dubbing import DubbingPipeline
 from videocaptioner.core.dubbing.pipeline import default_dubbed_audio_path
@@ -11,6 +13,20 @@ from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.ui.task_factory import TaskFactory
 
 logger = setup_logger("dubbing_interface_thread")
+
+
+def default_text_dubbing_output_path(response_format: str = "mp3") -> str:
+    """文案配音默认输出路径：用户可写目录（避免 Program Files / 安装目录无写权限）。
+
+    - 打包版：``~/字幕助手/dubbing/``
+    - 开发版：项目下 ``work-dir/dubbing/``
+    """
+    ext = response_format if response_format in ("mp3", "wav", "opus", "aac", "flac") else "mp3"
+    output_dir = WORK_PATH / "dubbing"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(output_dir / f"dubbing_{timestamp}.{ext}")
+
 
 
 class DubbingInterfaceThread(QThread):
@@ -30,6 +46,7 @@ class DubbingInterfaceThread(QThread):
         input_mode: str,
         input_data: str,
         output_path: str = None,
+        video_path: str = None,
     ):
         """初始化配音线程
 
@@ -37,11 +54,13 @@ class DubbingInterfaceThread(QThread):
             input_mode: "subtitle" 或 "text"
             input_data: 字幕文件路径（subtitle模式）或文案文本（text模式）
             output_path: 输出路径（可选，自动生成）
+            video_path: 可选视频文件路径（用于视频变速 / 硬字幕烧录）
         """
         super().__init__()
         self.input_mode = input_mode
         self.input_data = input_data
         self.output_path = output_path
+        self.video_path = video_path
         self._cancelled = False
 
     def run(self):
@@ -96,6 +115,7 @@ class DubbingInterfaceThread(QThread):
         output = pipeline.run(
             subtitle_path=subtitle_path,
             output_audio_path=self.output_path,
+            video_path=self.video_path,
             callback=self._on_pipeline_progress,
         )
 
@@ -104,12 +124,11 @@ class DubbingInterfaceThread(QThread):
 
         logger.info(f"配音完成: {output}")
         self.progress.emit(100, "配音完成")
-        self.finished.emit(str(output.audio_path))
+        self.finished.emit(str(output.video_path or output.audio_path))
 
     def _run_text_mode(self, config):
         """文案直接配音模式 — 生成临时 SRT 后复用字幕配音流程"""
         import tempfile
-        from datetime import datetime
 
         user_text = self.input_data
         logger.info(f"文案配音，文本长度: {len(user_text)} 字符")
@@ -123,13 +142,13 @@ class DubbingInterfaceThread(QThread):
         logger.info(f"文案分为 {len(segments)} 段")
         self.progress.emit(10, f"已分段: {len(segments)} 段")
 
-        # 构造 ASRData 并写成临时 SRT，pipeline 直接读 SRT
+        # 构造 ASRData 并写成临时 SRT，pipeline 直接读 SRT。
+        # 文案无真实时间轴：若用户未开固定停顿，用宽松占位时间戳 + 当前
+        # timing/fit 策略；若开了固定停顿，时间戳会被 pipeline 忽略。
         asr_data = ASRData([
             ASRDataSeg(text=seg, start_time=i * 5000, end_time=(i + 1) * 5000)
             for i, seg in enumerate(segments)
         ])
-        # fixed_line_pause 模式下时间戳无意义，确保开启
-        config.fixed_line_pause = True
 
         tmp_srt = tempfile.NamedTemporaryFile(suffix=".srt", delete=False, mode="w", encoding="utf-8")
         try:
@@ -141,15 +160,16 @@ class DubbingInterfaceThread(QThread):
             logger.info(f"开始配音，provider: {config.provider}")
 
             if not self.output_path:
-                output_dir = Path.cwd() / "dubbing"
-                output_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.output_path = str(output_dir / f"dubbing_{timestamp}.mp3")
+                # 不用 Path.cwd()：打包后 cwd 常是 Program Files，无写权限
+                self.output_path = default_text_dubbing_output_path(
+                    getattr(config, "response_format", None) or "mp3"
+                )
                 logger.info(f"自动生成输出路径: {self.output_path}")
 
             output = pipeline.run(
                 subtitle_path=tmp_srt.name,
                 output_audio_path=self.output_path,
+                video_path=self.video_path,
                 callback=self._on_pipeline_progress,
             )
         finally:
@@ -160,7 +180,7 @@ class DubbingInterfaceThread(QThread):
 
         logger.info(f"配音完成: {output}")
         self.progress.emit(100, "配音完成")
-        self.finished.emit(str(output.audio_path))
+        self.finished.emit(str(output.video_path or output.audio_path))
 
     def _split_text_into_segments(self, text: str) -> list:
         """将文案分割成段落

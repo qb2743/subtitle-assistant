@@ -236,4 +236,7 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         },
         fixed_line_pause=bool(cfg.dubbing_fixed_line_pause.value),
         fixed_line_pause_ms=int(cfg.dubbing_fixed_line_pause_ms.value),
+        subtitle_gap_ms=int(cfg.dubbing_subtitle_gap_ms.value),
+        video_autorate=bool(cfg.dubbing_video_autorate.value),
+        embed_subtitle=(cfg.dubbing_embed_subtitle.value or "none"),
     )

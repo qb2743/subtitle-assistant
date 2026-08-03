@@ -94,3 +94,14 @@ def test_align_text_to_asr_max_chars_zero_uses_comma_and_dash_boundaries():
     )
     aligned = align_text_to_asr(asr, "你好，世界——今天出发，然后回家--最后确认。", max_chars=0)
     assert [seg.text for seg in aligned.segments] == ["你好", "世界", "今天出发", "然后回家", "最后确认"]
+
+
+def test_align_text_to_asr_keeps_decimal_numbers():
+    # Regression: "2.5" must not split into "2" | "5" or become "25".
+    text = "About 2.5 kilometers from Tulum"
+    asr = ASRData([ASRDataSeg(text=text, start_time=0, end_time=4000)])
+    aligned = align_text_to_asr(asr, text, max_chars=30, language="en")
+    joined = " ".join(seg.text for seg in aligned.segments)
+    assert "2.5" in joined
+    assert not any(seg.text.strip().startswith("5 kilometers") for seg in aligned.segments)
+    assert not any(seg.text.strip().rstrip(".") == "About 2" for seg in aligned.segments)

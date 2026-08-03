@@ -43,6 +43,43 @@ _SUBTITLE_STRIP_PUNCT = set(
 # they're, we've, you'll, I'm, she'd. Curly ' is what sources usually ship.
 _ENGLISH_APOSTROPHE = re.compile(r"[’‘]['‘]?(?:s|t|re|ve|ll|m|d)\b", re.IGNORECASE)
 
+# Decimal / version numbers: 2.5, 13.5, 1.0.0 — the '.' must not be treated as a
+# sentence boundary or stripped from subtitle text.
+_DECIMAL_NUMBER_RE = re.compile(r"\d+(?:\.\d+)+")
+# Private-use placeholders so re.split on sentence punctuation cannot break them.
+_DEC_PH_PREFIX = ""
+_DEC_PH_SUFFIX = ""
+
+
+def protect_decimal_numbers(text: str) -> tuple[str, list[str]]:
+    """Replace ``2.5`` / ``1.0.0`` with placeholders; return (text, store)."""
+    store: list[str] = []
+
+    def _repl(match: re.Match) -> str:
+        store.append(match.group(0))
+        return f"{_DEC_PH_PREFIX}{len(store) - 1}{_DEC_PH_SUFFIX}"
+
+    return _DECIMAL_NUMBER_RE.sub(_repl, text), store
+
+
+def restore_decimal_numbers(text: str, store: list[str]) -> str:
+    """Undo :func:`protect_decimal_numbers`."""
+    for i, value in enumerate(store):
+        text = text.replace(f"{_DEC_PH_PREFIX}{i}{_DEC_PH_SUFFIX}", value)
+    return text
+
+
+def _is_decimal_dot(text: str, index: int) -> bool:
+    """True when ``text[index]`` is ``.`` between two digits (e.g. 2.5, 1.0.0)."""
+    if index < 0 or index >= len(text) or text[index] != ".":
+        return False
+    return (
+        index > 0
+        and index + 1 < len(text)
+        and text[index - 1].isdigit()
+        and text[index + 1].isdigit()
+    )
+
 
 def _should_normalize_apostrophe(text: str, language: str) -> bool:
     """True when ' is used as an English apostrophe, not a quote punctuation.
@@ -63,17 +100,35 @@ def strip_subtitle_punctuation(text: str, language: str = "") -> str:
     (explicit ``language`` = "en", or an English contraction/possessive like
     "Juho's", "don't" is detected). In other languages ' ' are quote
     punctuation and are stripped, not normalized.
+
+    Decimal points inside numbers (``2.5``, ``1.0.0``) are kept so measurements
+    and versions are not mangled into ``25`` / ``100``.
     """
     if not text:
         return text
     if _should_normalize_apostrophe(text, language):
         text = text.replace("‘", "'").replace("’", "'")
-    return "".join(c for c in text if c not in _SUBTITLE_STRIP_PUNCT)
+    return "".join(
+        c
+        for i, c in enumerate(text)
+        if c not in _SUBTITLE_STRIP_PUNCT or _is_decimal_dot(text, i)
+    )
 
 
 def remove_punctuation(text: str) -> str:
-    """Strip CJK + ASCII punctuation and whitespace for char-level matching."""
-    return "".join(c for c in text if c.strip() and c not in _PUNCTUATION)
+    """Strip CJK + ASCII punctuation and whitespace for char-level matching.
+
+    Decimal points inside numbers are kept so ``2.5`` stays distinguishable from
+    ``25`` when matching against ASR that also preserves the decimal.
+    """
+    out: list[str] = []
+    for i, c in enumerate(text):
+        if not c.strip():
+            continue
+        if c in _PUNCTUATION and not _is_decimal_dot(text, i):
+            continue
+        out.append(c)
+    return "".join(out)
 
 
 def split_text_into_segments(text: str, max_chars: int = 30) -> List[str]:
@@ -82,6 +137,9 @@ def split_text_into_segments(text: str, max_chars: int = 30) -> List[str]:
     Priority: newlines → sentence punctuation (。！？；.!?;) → comma punctuation
     (，,、) → hard char-count split. Each returned segment is ≤ ``max_chars``
     where possible.
+
+    Decimal points inside numbers (``2.5``, ``13.5``) are never treated as
+    sentence boundaries.
     """
     segments: List[str] = []
 
@@ -90,8 +148,9 @@ def split_text_into_segments(text: str, max_chars: int = 30) -> List[str]:
         if not line:
             continue
 
+        protected, store = protect_decimal_numbers(line)
         # Split on major sentence punctuation, keeping the punctuation.
-        sentences = re.split(r"([。！？；.!?;])", line)
+        sentences = re.split(r"([。！？；.!?;])", protected)
         current_segment = ""
         for i in range(0, len(sentences), 2):
             sentence = sentences[i]
@@ -104,16 +163,18 @@ def split_text_into_segments(text: str, max_chars: int = 30) -> List[str]:
                 current_segment = potential
             else:
                 if current_segment:
-                    segments.append(current_segment.strip())
+                    segments.append(
+                        restore_decimal_numbers(current_segment.strip(), store)
+                    )
                 if len(full_sentence) <= max_chars:
                     current_segment = full_sentence
                 else:
                     sub_segments = _split_long_sentence(full_sentence, max_chars)
                     for sub in sub_segments[:-1]:
-                        segments.append(sub.strip())
+                        segments.append(restore_decimal_numbers(sub.strip(), store))
                     current_segment = sub_segments[-1] if sub_segments else ""
         if current_segment.strip():
-            segments.append(current_segment.strip())
+            segments.append(restore_decimal_numbers(current_segment.strip(), store))
 
     return segments
 

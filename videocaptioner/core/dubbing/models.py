@@ -105,6 +105,26 @@ class DubbingConfig:
     # end-to-end with a silent pause between each line.
     fixed_line_pause: bool = False
     fixed_line_pause_ms: int = 1000
+    # 语音间隔(毫秒):每条配音结束后插入的静音,字幕时间轴整体顺延(保留原时间轴)。
+    # 与 fixed_line_pause 互斥:仅当 !fixed_line_pause 且 >0 时生效。
+    subtitle_gap_ms: int = 0
+    # 视频变速:音频超槽时逐段减速视频画面(需要 video_path)。
+    video_autorate: bool = False
+    # 嵌入硬字幕:"none" 不嵌入 | "hard" 烧录进输出视频。
+    embed_subtitle: str = "none"
+    # 视频减速上限倍数(pts_factor 上限)。
+    max_video_slowdown: float = 2.0
+    # 背景音(阶段2):分离人声/背景声。为 True 且提供 video_path 时,在 TTS 前
+    # 从视频提取的音频中分离出背景伴奏轨缓存到 work 目录。
+    separate_vocal: bool = False
+    # 背景音回嵌:时间轴组装后、mux 前把分离出的背景伴奏(或 extra_bgm)混回配音轨。
+    embed_bgm: bool = False
+    # 背景音短于配音时是否循环。
+    bgm_loop: bool = True
+    # 背景音音量(线性,如 0.8)。
+    bgm_volume: float = 0.8
+    # 额外背景音乐路径;为空则不使用。
+    extra_bgm_path: str = ""
 
 
 @dataclass
@@ -116,3 +136,5 @@ class DubbingResult:
     segments: list[DubbingSegment]
     duration_ms: int
     warnings: list[str] = field(default_factory=list)
+    # 字幕时间轴顺延(subtitle_gap_ms>0)时导出的调整后字幕路径;无则 None。
+    adjusted_subtitle_path: Optional[Path] = None

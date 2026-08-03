@@ -266,6 +266,18 @@ class Config(QConfig):
     dubbing_tts_workers = RangeConfigItem(
         "Dubbing", "TtsWorkers", 5, RangeValidator(1, 16)
     )
+    # 视频变速：音频超长时逐段减速画面（需选择视频）
+    dubbing_video_autorate = ConfigItem(
+        "Dubbing", "VideoAutoRate", False, BoolValidator()
+    )
+    # 语音间隔(ms)：每条配音后插入静音，字幕时间轴整体顺延（0=关闭）
+    dubbing_subtitle_gap_ms = RangeConfigItem(
+        "Dubbing", "SubtitleGapMs", 0, RangeValidator(0, 2000)
+    )
+    # 嵌入硬字幕："none" 不嵌入 | "hard" 烧录进输出视频（需选择视频）
+    dubbing_embed_subtitle = OptionsConfigItem(
+        "Dubbing", "EmbedSubtitle", "none", OptionsValidator(["none", "hard"])
+    )
     dubbing_api_key = ConfigItem("Dubbing", "ApiKey", "")
     dubbing_api_key_elevenlabs = ConfigItem("Dubbing", "ApiKeyElevenLabs", "")
     dubbing_api_key_siliconflow = ConfigItem("Dubbing", "ApiKeySiliconFlow", "")

@@ -2,6 +2,8 @@
 
 import hashlib
 import shutil
+import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -12,6 +14,8 @@ from videocaptioner.core.speech import (
     SynthesisRequest,
     create_speech_synthesizer,
 )
+from videocaptioner.core.speech.api_keys import parse_api_keys
+from videocaptioner.core.utils.logger import setup_logger
 
 from .audio import (
     change_tempo,
@@ -20,8 +24,7 @@ from .audio import (
     get_audio_duration_ms,
     mux_dubbed_audio,
 )
-from videocaptioner.core.speech.api_keys import parse_api_keys
-
+from .background_mix import mix_background
 from .models import (
     DubbingConfig,
     DubbingResult,
@@ -31,11 +34,25 @@ from .models import (
 )
 from .rewriter import rewrite_segments_if_needed
 from .subtitle_parser import load_dubbing_segments
-from videocaptioner.core.utils.logger import setup_logger
+from .timeline import compute_timeline_placements, write_adjusted_subtitle
+from .video_rate import (
+    RatePlan,
+    apply_video_rate,
+    compute_rate_plan,
+    get_video_duration_ms,
+)
 
 logger = setup_logger("dubbing")
 
 ProgressCallback = Callable[[int, str], None]
+
+# On Windows, suppress "Application Error" crash dialogs for ffmpeg.
+_SUBPROCESS_KWARGS: dict = {}
+if sys.platform == "win32":
+    import ctypes
+
+    ctypes.windll.kernel32.SetErrorMode(0x0003)
+    _SUBPROCESS_KWARGS["creationflags"] = subprocess.CREATE_NO_WINDOW
 
 
 def resolve_tts_worker_count(config: DubbingConfig, segment_count: int) -> int:
@@ -128,10 +145,34 @@ class DubbingPipeline:
             raise ValueError("No subtitle lines found for dubbing")
         self._apply_speakers(segments)
 
+        warnings: list[str] = []
+        instrument_path: Optional[str] = None
+        if self.config.separate_vocal:
+            if not video_path:
+                warnings.append("separate_vocal 需要视频输入,已跳过人声分离")
+                logger.warning("separate_vocal requires video_path; skipping separation")
+            else:
+                cb(4, "separating vocals")
+                try:
+                    from videocaptioner.core.separation import separate_vocals
+
+                    source_audio = work / "source_audio.wav"
+                    self._extract_video_audio(video_path, source_audio)
+                    cb(5, "separating vocals and background")
+                    _vocal, instrument_path = separate_vocals(
+                        str(source_audio),
+                        str(work),
+                        progress=cb,
+                    )
+                    logger.info("分离人声/背景声完成: %s", instrument_path)
+                except Exception as exc:
+                    instrument_path = None
+                    warnings.append(f"人声分离失败,已跳过: {exc}")
+                    logger.warning("人声分离失败,已跳过: %s", exc)
+
         cb(8, "rewriting long lines")
         rewrite_segments_if_needed(segments, self.config)
 
-        warnings: list[str] = []
         timeline_items: list[tuple[str, int]] = []
         total = len(segments)
         workers = resolve_tts_worker_count(self.config, total)
@@ -166,8 +207,63 @@ class DubbingPipeline:
                 cb(10 + int(completed / total * 75), f"synthesizing {completed}/{total}")
 
         segments = [seg for seg in ordered if seg is not None]
+        adjusted_subtitle_path: Optional[Path] = None
+        video_plan: Optional[RatePlan] = None
         if self.config.fixed_line_pause:
+            # 固定停顿模式忽略原时间轴,不做视频变速。
             timeline_items, duration_ms = self._build_fixed_pause_timeline(segments, work)
+        elif self.config.video_autorate and video_path:
+            # 视频变速:由 rate plan 统一推导输出时间轴,音频放置从计划反推。
+            slots = [(seg.start_ms, seg.end_ms) for seg in segments]
+            audio_durations = [seg.fitted_duration_ms for seg in segments]
+            video_duration_ms = get_video_duration_ms(video_path)
+            plan, placements, extra_tempo = compute_rate_plan(
+                slots,
+                audio_durations,
+                self.config.subtitle_gap_ms,
+                video_duration_ms,
+                self.config.max_video_slowdown,
+            )
+            # 对超限段二次压缩音频,保证音频必然放得下。
+            for i, seg in enumerate(segments):
+                if extra_tempo[i] > 1.0:
+                    compressed = work / f"tempo_{seg.index:04d}.wav"
+                    change_tempo(seg.fitted_path, str(compressed), extra_tempo[i])
+                    seg.fitted_path = str(compressed)
+                    seg.fitted_duration_ms = get_audio_duration_ms(seg.fitted_path)
+            timeline_items = [
+                (seg.fitted_path, placements[i][0]) for i, seg in enumerate(segments)
+            ]
+            duration_ms = plan.total_output_duration_ms
+            adjusted_subtitle_path = Path(
+                write_adjusted_subtitle(
+                    segments,
+                    placements,
+                    str(out_audio.with_name(out_audio.stem + ".adjusted.srt")),
+                )
+            )
+            video_plan = plan
+        elif self.config.subtitle_gap_ms > 0:
+            # 语音间隔模式:每条配音后插入静音,保留原时间轴整体顺延。
+            placements = compute_timeline_placements(
+                [seg.start_ms for seg in segments],
+                [seg.fitted_duration_ms for seg in segments],
+                self.config.subtitle_gap_ms,
+            )
+            timeline_items = [
+                (seg.fitted_path, placements[i][0]) for i, seg in enumerate(segments)
+            ]
+            duration_ms = max(
+                max(seg.end_ms for seg in segments),
+                placements[-1][1],
+            )
+            adjusted_subtitle_path = Path(
+                write_adjusted_subtitle(
+                    segments,
+                    placements,
+                    str(out_audio.with_name(out_audio.stem + ".adjusted.srt")),
+                )
+            )
         else:
             for segment in segments:
                 timeline_items.append((segment.fitted_path, segment.start_ms))
@@ -189,14 +285,40 @@ class DubbingPipeline:
             volume=self.config.dubbed_audio_volume,
         )
 
+        if self.config.embed_bgm and (
+            instrument_path or self.config.extra_bgm_path
+        ):
+            cb(92, "mixing background audio")
+            try:
+                mixed = work / "dubbed_bgm.wav"
+                mix_background(
+                    str(out_audio),
+                    instrument_path=instrument_path,
+                    volume=self.config.bgm_volume,
+                    loop=self.config.bgm_loop,
+                    extra_bgm_path=self.config.extra_bgm_path or None,
+                    output_path=str(mixed),
+                )
+                # 产物替代 out_audio 进入后续 mux / 烧录。
+                shutil.move(str(mixed), str(out_audio))
+            except Exception as exc:
+                warnings.append(f"背景音回嵌失败,已跳过: {exc}")
+                logger.warning("背景音回嵌失败,已跳过: %s", exc)
+
         out_video: Optional[Path] = None
         if video_path:
             if not output_video_path:
                 base = Path(video_path)
                 output_video_path = str(base.with_stem(base.stem + "_dubbed"))
+            mux_source = video_path
+            if self.config.video_autorate and video_plan is not None:
+                cb(90, "adjusting video rate")
+                rate_video = str(work / "rate.mp4")
+                apply_video_rate(video_path, video_plan, rate_video, callback=cb)
+                mux_source = rate_video
             cb(94, "muxing video")
             mux_dubbed_audio(
-                video_path,
+                mux_source,
                 str(out_audio),
                 output_video_path,
                 mix_original_audio=self.config.mix_original_audio,
@@ -205,6 +327,16 @@ class DubbingPipeline:
             )
             out_video = Path(output_video_path)
 
+            if self.config.embed_subtitle == "hard":
+                from videocaptioner.core.utils.video_utils import add_subtitles
+
+                cb(96, "burning subtitles")
+                subtitle_source = adjusted_subtitle_path or Path(subtitle_path)
+                baked = work / "baked.mp4"
+                add_subtitles(str(out_video), str(subtitle_source), str(baked))
+                # 跨盘符安全:replace 会抛 OSError,改用 shutil.move。
+                shutil.move(str(baked), str(out_video))
+
         cb(100, "completed")
         return DubbingResult(
             audio_path=out_audio,
@@ -212,7 +344,33 @@ class DubbingPipeline:
             segments=segments,
             duration_ms=duration_ms,
             warnings=warnings,
+            adjusted_subtitle_path=adjusted_subtitle_path,
         )
+
+    @staticmethod
+    def _extract_video_audio(video_path: str, out_path: Path) -> None:
+        """用 ffmpeg 从视频提取背景音回嵌所需的 44.1kHz 立体声 wav。
+
+        与 ``separate_vocals`` 的模型输入要求一致(UVR 期望 44100Hz / 2 声道)。
+        """
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            video_path,
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-c:a",
+            "pcm_s16le",
+            str(out_path),
+        ]
+        subprocess.run(cmd, check=True, **_SUBPROCESS_KWARGS)
 
     def _apply_speakers(self, segments: list[DubbingSegment]) -> None:
         default_profile = self.config.speaker_profiles.get("default")

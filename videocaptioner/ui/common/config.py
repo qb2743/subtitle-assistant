@@ -233,7 +233,7 @@ class Config(QConfig):
     # ------------------- 字幕配置 -------------------
     need_optimize = ConfigItem("Subtitle", "NeedOptimize", False, BoolValidator())
     need_translate = ConfigItem("Subtitle", "NeedTranslate", False, BoolValidator())
-    need_split = ConfigItem("Subtitle", "NeedSplit", False, BoolValidator())
+    need_split = ConfigItem("Subtitle", "NeedSplit", True, BoolValidator())
     target_language = OptionsConfigItem(
         "Subtitle",
         "TargetLanguage",
@@ -242,10 +242,10 @@ class Config(QConfig):
         EnumSerializer(TargetLanguage),
     )
     max_word_count_cjk = ConfigItem(
-        "Subtitle", "MaxWordCountCJK", 28, RangeValidator(8, 100)
+        "Subtitle", "MaxWordCountCJK", 20, RangeValidator(8, 100)
     )
     max_word_count_english = ConfigItem(
-        "Subtitle", "MaxWordCountEnglish", 20, RangeValidator(8, 100)
+        "Subtitle", "MaxWordCountEnglish", 12, RangeValidator(8, 100)
     )
     translation_prompt_text = ConfigItem("Subtitle", "TranslationPromptText", "")
     custom_prompt_text = ConfigItem("Subtitle", "CustomPromptText", "")
@@ -292,6 +292,36 @@ class Config(QConfig):
     )
     # 额外背景音频路径
     dubbing_extra_bgm_path = ConfigItem("Dubbing", "ExtraBgmPath", "")
+    # 说话人识别：启用视频音频的说话人分离与字幕行分配
+    dubbing_enable_diarization = ConfigItem(
+        "Dubbing", "EnableDiarization", False, BoolValidator()
+    )
+    # 说话人数量上限；0 表示不限（自动聚类），其余为 2-6 人
+    dubbing_speaker_count = OptionsConfigItem(
+        "Dubbing",
+        "SpeakerCount",
+        0,
+        OptionsValidator([0, 2, 3, 4, 5, 6]),
+    )
+    # 仅保留主说话人的解说/旁白字幕
+    dubbing_narrator_only = ConfigItem(
+        "Dubbing", "NarratorOnly", False, BoolValidator()
+    )
+    # 对被旁白过滤删掉的字幕进行 LLM 二次复核
+    dubbing_narrator_llm_review = ConfigItem(
+        "Dubbing", "NarratorLlmReview", False, BoolValidator()
+    )
+    # 阶段4画面滤镜与输出目录
+    dubbing_random_mirror = ConfigItem(
+        "Dubbing", "RandomMirror", False, BoolValidator()
+    )
+    dubbing_random_color = ConfigItem(
+        "Dubbing", "RandomColor", False, BoolValidator()
+    )
+    dubbing_canvas = OptionsConfigItem(
+        "Dubbing", "Canvas", "off", OptionsValidator(["off", "1080x1920", "1920x1080"])
+    )
+    dubbing_output_dir = ConfigItem("Dubbing", "OutputDir", "")
     dubbing_api_key = ConfigItem("Dubbing", "ApiKey", "")
     dubbing_api_key_elevenlabs = ConfigItem("Dubbing", "ApiKeyElevenLabs", "")
     dubbing_api_key_siliconflow = ConfigItem("Dubbing", "ApiKeySiliconFlow", "")

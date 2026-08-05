@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
+from videocaptioner.core.entities import SubtitleLayoutEnum, SubtitleRenderModeEnum
+
 DubbingProvider = Literal["siliconflow", "gemini", "edge", "elevenlabs", "dots", "voxcpm", "openai", "fishaudio"]
 FitMode = Literal["none", "tempo"]
 
@@ -108,12 +110,12 @@ class DubbingConfig:
     # 语音间隔(毫秒):每条配音结束后插入的静音,字幕时间轴整体顺延(保留原时间轴)。
     # 与 fixed_line_pause 互斥:仅当 !fixed_line_pause 且 >0 时生效。
     subtitle_gap_ms: int = 0
-    # 视频变速:音频超槽时逐段减速视频画面(需要 video_path)。
+    # 视频变速:按实际配音时长逐段加速或减速视频画面(需要 video_path)。
     video_autorate: bool = False
     # 嵌入硬字幕:"none" 不嵌入 | "hard" 烧录进输出视频。
     embed_subtitle: str = "none"
-    # 视频减速上限倍数(pts_factor 上限)。
-    max_video_slowdown: float = 2.0
+    # 视频变速倍率上限；与参考项目默认值一致。
+    max_video_slowdown: float = 10.0
     # 背景音(阶段2):分离人声/背景声。为 True 且提供 video_path 时,在 TTS 前
     # 从视频提取的音频中分离出背景伴奏轨缓存到 work 目录。
     separate_vocal: bool = False
@@ -125,6 +127,28 @@ class DubbingConfig:
     bgm_volume: float = 0.8
     # 额外背景音乐路径;为空则不使用。
     extra_bgm_path: str = ""
+    # 说话人识别(阶段3):识别视频音频中的说话人并分配到字幕行。为 True 且提供
+    # video_path 时,在 TTS 前运行 sherpa-onnx 说话人分离。
+    enable_diarization: bool = False
+    # 说话人数量语义:0 不限(自动聚类)/ >0 上限。仅 enable_diarization 时生效。
+    speaker_count: int = 0
+    # 仅保留解说员字幕:在说话人识别后,按时长占比选出主说话人并过滤掉其它字幕。
+    narrator_only: bool = False
+    # LLM 复核被删字幕:对解说员过滤删掉的字幕,用 LLM 判定是否误删并恢复。
+    narrator_llm_review: bool = False
+    # 说话人识别语言; ``auto`` 按字幕文本推断,也可显式使用 ``zh``/``en``。
+    diarization_language: str = "auto"
+    # 阶段4 画面效果。canvas 使用 "off" 或 "宽x高"（如 1080x1920）。
+    random_mirror: bool = False
+    random_color: bool = False
+    canvas: str = "off"
+    # 输出目录为空时沿用调用方传入路径。
+    output_dir: str = ""
+    # 硬字幕渲染样式；默认普通 FFmpeg 字幕以保持向后兼容。
+    subtitle_render_mode: SubtitleRenderModeEnum | str = SubtitleRenderModeEnum.ASS_STYLE
+    subtitle_layout: SubtitleLayoutEnum | str = SubtitleLayoutEnum.ONLY_ORIGINAL
+    subtitle_ass_style: str = ""
+    subtitle_rounded_style: Optional[dict] = None
 
 
 @dataclass

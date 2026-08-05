@@ -26,9 +26,9 @@ try:  # openai is a core dependency; guarded so the module still imports without
 except ImportError:  # pragma: no cover
     _OpenAIClient = None
 
+from videocaptioner.core.llm.request_logger import create_http_client
 from videocaptioner.core.utils.cache import get_tts_cache
 from videocaptioner.core.utils.logger import setup_logger
-from videocaptioner.core.llm.request_logger import create_http_client
 
 from .api_keys import parse_api_keys
 from .models import SpeechProviderConfig, SynthesisRequest, SynthesisResult
@@ -84,7 +84,17 @@ class EdgeTTSSpeechSynthesizer:
         voice = request.voice or self.config.default_voice or self.DEFAULT_VOICE
         path = Path(request.output_path).with_suffix(".mp3")
         path.parent.mkdir(parents=True, exist_ok=True)
-        asyncio.run(self._save(request.text, voice, path))
+        for attempt in range(3):
+            try:
+                asyncio.run(self._save(request.text, voice, path))
+                break
+            except Exception as exc:
+                path.unlink(missing_ok=True)
+                if attempt == 2 or not self._is_transient_error(exc):
+                    raise
+                delay = 2**attempt
+                logger.warning("Edge TTS transient failure; retrying in %ss: %s", delay, exc)
+                time.sleep(delay)
         if not path.exists() or path.stat().st_size <= 0:
             raise ValueError("Edge TTS returned an empty audio file")
         return SynthesisResult(
@@ -109,6 +119,13 @@ class EdgeTTSSpeechSynthesizer:
             receive_timeout=self.config.timeout,
         )
         await communicate.save(str(path))
+
+    @staticmethod
+    def _is_transient_error(error: Exception) -> bool:
+        status = getattr(error, "status", None)
+        return status == 429 or (isinstance(status, int) and status >= 500) or isinstance(
+            error, (TimeoutError, ConnectionError, OSError)
+        )
 
     def _edge_rate(self) -> str:
         percent = round((self.config.speed - 1.0) * 100)

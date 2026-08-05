@@ -14,4 +14,5 @@ if ($LASTEXITCODE -eq 0 -and $hasPip -ne $null) {
     uv pip install --python $py pyinstaller pillow -q
 }
 & $py -m PyInstaller --noconfirm --clean (Join-Path $Root "packaging/字幕助手.spec")
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 Write-Host "Output: $Root/dist/字幕助手/"

@@ -1,5 +1,6 @@
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -14,16 +15,20 @@ class VideoInfoThread(QThread):
     finished = pyqtSignal(VideoInfo)
     error = pyqtSignal(str)
 
-    def __init__(self, file_path):
+    def __init__(self, file_path, thumbnail_path: Optional[str] = None):
         super().__init__()
         self.file_path = file_path
+        self.thumbnail_path = thumbnail_path
 
     def run(self):
         try:
             # 生成缩略图到临时文件
-            temp_dir = tempfile.gettempdir()
-            file_name = Path(self.file_path).stem
-            thumbnail_path = f"{temp_dir}/{file_name}_thumbnail.jpg"
+            if self.thumbnail_path:
+                thumbnail_path = self.thumbnail_path
+            else:
+                temp_dir = tempfile.gettempdir()
+                file_name = Path(self.file_path).stem
+                thumbnail_path = f"{temp_dir}/{file_name}_thumbnail.jpg"
 
             # 使用统一的 get_video_info 函数
             video_info = get_video_info(self.file_path, thumbnail_path=thumbnail_path)

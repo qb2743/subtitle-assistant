@@ -12,6 +12,7 @@ from PIL import Image
 from videocaptioner.config import CACHE_PATH, FONTS_PATH, RESOURCE_PATH
 from videocaptioner.core.entities import SubtitleLayoutEnum
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.video_filters import build_canvas_filter
 
 from .ass_utils import auto_wrap_ass_file
 
@@ -190,13 +191,14 @@ def render_ass_preview(
         # 添加内置字体目录支持
         fonts_dir_escaped = str(FONTS_PATH).replace("\\", "/").replace(":", r"\:")
 
+        canvas_filter = build_canvas_filter((width, height))
         cmd = [
             "ffmpeg",
             "-y",
             "-i",
             str(bg_path_obj),
             "-vf",
-            f"ass='{ass_file_escaped}':fontsdir='{fonts_dir_escaped}'",
+            f"{canvas_filter},ass='{ass_file_escaped}':fontsdir='{fonts_dir_escaped}'",
             "-frames:v",
             "1",
             str(output_path),
@@ -228,6 +230,8 @@ def _get_video_resolution(video_path: str) -> Tuple[int, int]:
         ["ffmpeg", "-i", video_path],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         creationflags=(
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         ),
@@ -235,7 +239,7 @@ def _get_video_resolution(video_path: str) -> Tuple[int, int]:
 
     # 从 ffmpeg 输出中解析分辨率
     pattern = r"(\d{2,5})x(\d{2,5})"
-    match = re.search(pattern, result.stderr)
+    match = re.search(pattern, result.stderr or "")
     if match:
         return int(match.group(1)), int(match.group(2))
     return 1920, 1080  # 默认返回 1080P

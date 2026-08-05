@@ -18,34 +18,29 @@ from videocaptioner.core.dubbing.video_rate import (
     compute_rate_plan,
 )
 
-
 # ---------------------------------------------------------------- pure plan
 
 
-def test_rate_plan_full_coverage_keeps_inter_slot_frames():
-    # 槽[1000,2000] 与 [4000,5000] 之间(2000..4000)以及头尾都必须保留。
+def test_rate_plan_compacts_inter_slot_gaps_without_dropping_frames():
+    # 当前字幕槽扩展到下一字幕开始，长空档随当前配音一起加速。
     slots = [(1000, 2000), (4000, 5000)]
     plan, placements, extra = compute_rate_plan(
         slots, [1000, 1000], 0, video_duration_ms=6000, max_slowdown=2.0
     )
-    # 5 个区间:head / slot0 / inter / slot1 / tail。
+    # 3 个连续区间:head / slot0(含原空档) / slot1(含片尾)。
     assert [(i.start_ms, i.end_ms) for i in plan.items] == [
         (0, 1000),
-        (1000, 2000),
-        (2000, 4000),
-        (4000, 5000),
-        (5000, 6000),
+        (1000, 4000),
+        (4000, 6000),
     ]
-    # 音频都不超槽 → 全部 pts=1.0。
-    assert all(i.pts_factor == 1.0 for i in plan.items)
-    # 输出总长 = 各区间输出时长之和 = 1000+1000+2000+1000+1000。
-    assert plan.total_output_duration_ms == 6000
+    # 2x 加速上限下，3s/2s 源槽分别压到 1.5s/1s。
+    assert [i.pts_factor for i in plan.items] == [1.0, 0.5, 0.5]
+    assert plan.total_output_duration_ms == 3500
     assert plan.total_output_duration_ms == sum(
         (i.end_ms - i.start_ms) * i.pts_factor + i.pad_after_ms
         for i in plan.items
     )
-    # 音频放置从输出时间轴累积推导。
-    assert placements == [(1000, 2000), (4000, 5000)]
+    assert placements == [(1000, 2000), (2500, 3500)]
 
 
 def test_rate_plan_sync_accumulation():
@@ -54,22 +49,21 @@ def test_rate_plan_sync_accumulation():
     plan, placements, extra = compute_rate_plan(
         slots, [1000, 1000], 0, video_duration_ms=6000, max_slowdown=2.0
     )
-    # slot0 起点 = head(1000);slot1 起点 = head(1000)+slot0(1000)+inter(2000)。
+    # slot0 起点 = head(1000);slot1 起点 = head + 加速后的完整 slot0。
     assert placements[0][0] == 1000
-    assert placements[1][0] == 4000
+    assert placements[1][0] == 2500
 
 
 def test_rate_plan_slowdown_slot():
-    slots = [(1000, 2000), (3000, 5000)]
+    slots = [(0, 1000), (1000, 2000)]
     plan, placements, extra = compute_rate_plan(
-        slots, [2000, 1000], 0, video_duration_ms=6000, max_slowdown=2.0
+        slots, [2000, 1000], 0, video_duration_ms=2000, max_slowdown=2.0
     )
     # slot0 音频 2000 > 槽 1000 → pts=2.0;slot1 音频 1000 == 槽 → pts=1.0。
     slot_pts = {i.start_ms: i.pts_factor for i in plan.items}
-    assert slot_pts[1000] == pytest.approx(2.0)
-    assert slot_pts[3000] == 1.0
-    # 输出总长 = head1000 + slot0 2000 + inter1000 + slot1 2000 + tail1000。
-    assert plan.total_output_duration_ms == 7000
+    assert slot_pts[0] == pytest.approx(2.0)
+    assert slot_pts[1000] == 1.0
+    assert plan.total_output_duration_ms == 3000
     # 音频仍未超长,无需二次压缩。
     assert extra == [1.0, 1.0]
 
@@ -87,18 +81,16 @@ def test_rate_plan_extra_tempo_when_audio_too_long():
     assert plan.total_output_duration_ms == 2000
 
 
-def test_rate_plan_gap_pads_frozen_frame():
-    # gap>0 时每个槽后追加冻结帧,输出时间轴相应顺延。
+def test_rate_plan_gap_is_part_of_continuous_video_slot():
+    # gap 属于画面目标时长，画面连续播放而不是追加冻结帧。
     slots = [(0, 1000), (2000, 3000)]
     plan, placements, extra = compute_rate_plan(
         slots, [1000, 1000], 500, video_duration_ms=4000, max_slowdown=2.0
     )
-    # slot0 与 slot1 都带 pad_after=500。
-    assert {i.start_ms: i.pad_after_ms for i in plan.items if i.pts_factor == 1.0}[0] == 500
-    # 输出总长 = 1000+500 + 1000 + 1000+500 + 1000 = 5000。
-    assert plan.total_output_duration_ms == 5000
-    # slot1 起点 = slot0(1000+500 pad) + inter(1000) = 2500。
-    assert placements[1][0] == 2500
+    assert all(i.pad_after_ms == 0 for i in plan.items)
+    assert [i.pts_factor for i in plan.items] == [0.75, 0.75]
+    assert plan.total_output_duration_ms == 3000
+    assert placements == [(0, 1000), (1500, 2500)]
 
 
 def test_rate_plan_empty():

@@ -79,9 +79,51 @@ _DUBBING_API_KEY_ATTRS = {
 }
 
 
+def _subtitle_style_fields() -> tuple[str, dict | None]:
+    """Resolve the existing subtitle-style settings for the dubbing pipeline."""
+    if not bool(cfg.use_subtitle_style.value) and cfg.dubbing_embed_subtitle.value != "hard":
+        return "", None
+
+    ass_style = ""
+    try:
+        from videocaptioner.core.subtitle.style_manager import load_style
+
+        style = load_style(cfg.subtitle_style_name.value)
+        if style is not None:
+            ass_style = style.to_ass_string()
+    except Exception:
+        ass_style = ""
+
+    rounded_style = {
+        "font_name": cfg.rounded_bg_font_name.value,
+        "font_size": cfg.rounded_bg_font_size.value,
+        "bg_color": cfg.rounded_bg_color.value,
+        "text_color": cfg.rounded_bg_text_color.value,
+        "corner_radius": cfg.rounded_bg_corner_radius.value,
+        "padding_h": cfg.rounded_bg_padding_h.value,
+        "padding_v": cfg.rounded_bg_padding_v.value,
+        "margin_bottom": cfg.rounded_bg_margin_bottom.value,
+        "line_spacing": cfg.rounded_bg_line_spacing.value,
+        "letter_spacing": cfg.rounded_bg_letter_spacing.value,
+    }
+    return ass_style, rounded_style
+
+
 def dubbing_api_key_attr(provider: str) -> str:
     """该 provider 在 cfg 上对应的 API Key 属性名；无独立字段回退到旧的 dubbing_api_key。"""
     return _DUBBING_API_KEY_ATTRS.get(provider, "dubbing_api_key")
+
+
+def diarization_language_from_transcribe(language) -> str:
+    """Map the transcription language to the matching speaker embedding."""
+    name = getattr(language, "name", "")
+    if name in {"CHINESE", "YUE"}:
+        return "zh"
+    if name == "ENGLISH":
+        return "en"
+    if name == "AUTO":
+        return "auto"
+    return "multi"
 
 
 def _resolve_timing() -> tuple[FitMode, float]:
@@ -193,7 +235,9 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
     fit_mode, max_speed = _resolve_timing()
     mix_original, original_vol = _resolve_audio_mix()
     rewrite = bool(cfg.dubbing_adapt_length.value)
+    narrator_review = bool(cfg.dubbing_narrator_llm_review.value)
     llm_key, llm_base, llm_model = _llm_fields_for_rewrite()
+    subtitle_ass_style, subtitle_rounded_style = _subtitle_style_fields()
 
     local_start_script = ""
     clone_audio_path = ""
@@ -222,9 +266,9 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         max_speed=max_speed,
         rewrite_too_long=rewrite,
         rewrite_threshold=1.15,
-        llm_api_key=llm_key if rewrite else "",
-        llm_api_base=llm_base if rewrite else "",
-        llm_model=llm_model if rewrite else "",
+        llm_api_key=llm_key if (rewrite or narrator_review) else "",
+        llm_api_base=llm_base if (rewrite or narrator_review) else "",
+        llm_model=llm_model if (rewrite or narrator_review) else "",
         mix_original_audio=mix_original,
         original_audio_volume=original_vol,
         clone_audio_path=clone_audio_path,
@@ -244,4 +288,19 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         bgm_loop=bool(cfg.dubbing_bgm_loop.value),
         bgm_volume=float(cfg.dubbing_bgm_volume.value),
         extra_bgm_path=(cfg.dubbing_extra_bgm_path.value or ""),
+        enable_diarization=bool(cfg.dubbing_enable_diarization.value),
+        speaker_count=int(cfg.dubbing_speaker_count.value),
+        narrator_only=bool(cfg.dubbing_narrator_only.value),
+        narrator_llm_review=narrator_review,
+        diarization_language=diarization_language_from_transcribe(
+            cfg.transcribe_language.value
+        ),
+        random_mirror=bool(getattr(cfg, "dubbing_random_mirror").value),
+        random_color=bool(getattr(cfg, "dubbing_random_color").value),
+        canvas=str(getattr(cfg, "dubbing_canvas").value or "off"),
+        output_dir=str(getattr(cfg, "dubbing_output_dir").value or ""),
+        subtitle_render_mode=cfg.subtitle_render_mode.value,
+        subtitle_layout=cfg.subtitle_layout.value,
+        subtitle_ass_style=subtitle_ass_style,
+        subtitle_rounded_style=subtitle_rounded_style,
     )

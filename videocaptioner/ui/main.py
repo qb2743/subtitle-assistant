@@ -3,10 +3,42 @@
 import os
 import platform
 import sys
+from pathlib import Path
+
+
+def _configure_qt_plugin_path() -> None:
+    """Point Qt at the bundled PyQt platform plugins before QApplication starts.
+
+    On Windows, Qt 5 can mangle non-ASCII source paths when deriving
+    ``QLibraryInfo`` paths.  This project is commonly checked out under a
+    Chinese directory, so set the plugin paths explicitly and prefer only
+    candidates that actually exist.
+    """
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(Path(meipass) / "PyQt5" / "Qt5" / "plugins")
+    lib_folder = "Lib" if platform.system() == "Windows" else "lib"
+    candidates.append(
+        Path(sys.prefix) / lib_folder / "site-packages" / "PyQt5" / "Qt5" / "plugins"
+    )
+
+    for plugin_root in candidates:
+        platforms = plugin_root / "platforms"
+        if not platforms.is_dir():
+            continue
+        os.environ["QT_PLUGIN_PATH"] = str(plugin_root)
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms)
+        return
 
 
 def main():
     import traceback
+
+    # Must run before QApplication is constructed; importing Qt modules alone
+    # does not load a platform plugin yet.
+    _configure_qt_plugin_path()
 
     from PyQt5.QtCore import Qt, QTranslator
     from PyQt5.QtWidgets import QApplication
@@ -22,14 +54,12 @@ def main():
         sys.stdout = _stdout
 
     from videocaptioner.ui.common.config import cfg
-    from videocaptioner.ui.view.main_window import MainWindow
 
-    # Qt platform plugin path
-    lib_folder = "Lib" if platform.system() == "Windows" else "lib"
-    plugin_path = os.path.join(
-        sys.prefix, lib_folder, "site-packages", "PyQt5", "Qt5", "plugins"
-    )
-    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = plugin_path
+    # sherpa-onnx requires its bundled ORT 1.24; load it before other native modules.
+    if sys.platform == "win32":
+        import sherpa_onnx  # noqa: F401
+
+    from videocaptioner.ui.view.main_window import MainWindow
 
     # Logger + global exception hook
     logger = setup_logger("字幕助手")
@@ -73,4 +103,7 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()

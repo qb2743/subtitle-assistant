@@ -2,17 +2,18 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
-from PIL import ImageFont
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFontDatabase
-from PyQt5.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt5.QtCore import QPoint, Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QFontDatabase
+from PyQt5.QtWidgets import QAction, QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
+    ComboBox,
     ImageLabel,
     InfoBar,
     InfoBarPosition,
     LineEdit,
+    MenuAnimationType,
     MessageBoxBase,
     PushSettingCard,
     ScrollArea,
@@ -23,10 +24,17 @@ from qfluentwidgets import FluentIcon as FIF
 from videocaptioner.config import ASSETS_PATH, SUBTITLE_STYLE_PATH
 from videocaptioner.core.constant import INFOBAR_DURATION_SUCCESS, INFOBAR_DURATION_WARNING
 from videocaptioner.core.entities import SubtitleLayoutEnum, SubtitleRenderModeEnum
-from videocaptioner.core.subtitle import get_builtin_fonts, render_ass_preview, render_preview
+from videocaptioner.core.subtitle import (
+    font_supports_text,
+    get_font_ass_attributes,
+    get_font_variants,
+    render_ass_preview,
+    render_preview,
+)
 from videocaptioner.core.subtitle.style_manager import StyleMode
 from videocaptioner.core.subtitle.styles import RoundedBgStyle
 from videocaptioner.core.utils.platform_utils import open_folder
+from videocaptioner.core.utils.video_filters import _normalise_canvas
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.MySettingCard import (
@@ -47,6 +55,58 @@ PERVIEW_TEXTS = {
     ),
     "短文本": ("Elementary school students know this", "小学二年级的都知道"),
 }
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+class FontPreviewComboBox(ComboBox):
+    """Fluent combo box whose menu labels are drawn with their own fonts."""
+
+    def _showComboMenu(self):
+        if not self.items:
+            return
+
+        menu = self._createComboMenu()
+        for index, item in enumerate(self.items):
+            action = QAction(
+                item.text,
+                triggered=lambda checked=False, i=index: self._onItemClicked(i),
+            )
+            if isinstance(item.userData, dict) and isinstance(
+                item.userData.get("font"), QFont
+            ):
+                action.setFont(item.userData["font"])
+            action.setEnabled(item.isEnabled)
+            menu.addAction(action)
+
+        menu.setItemHeight(40)
+        if menu.view.width() < self.width():
+            menu.view.setMinimumWidth(self.width())
+            menu.adjustSize()
+        menu.setMaxVisibleItems(self.maxVisibleItems())
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        menu.closedSignal.connect(self._onDropMenuClosed)
+        self.dropMenu = menu
+
+        if self.currentIndex() >= 0:
+            menu.setDefaultAction(menu.actions()[self.currentIndex()])
+
+        x = -menu.width() // 2 + menu.layout().contentsMargins().left() + self.width() // 2
+        down_pos = self.mapToGlobal(QPoint(x, self.height()))
+        up_pos = self.mapToGlobal(QPoint(x, 0))
+        down_height = menu.view.heightForAnimation(
+            down_pos, MenuAnimationType.DROP_DOWN
+        )
+        up_height = menu.view.heightForAnimation(up_pos, MenuAnimationType.PULL_UP)
+        if down_height >= up_height:
+            menu.view.adjustSize(down_pos, MenuAnimationType.DROP_DOWN)
+            menu.exec(down_pos, aniType=MenuAnimationType.DROP_DOWN)
+        else:
+            menu.view.adjustSize(up_pos, MenuAnimationType.PULL_UP)
+            menu.exec(up_pos, aniType=MenuAnimationType.PULL_UP)
+
 
 DEFAULT_BG_LANDSCAPE = {
     "path": ASSETS_PATH / "default_bg_landscape.png",
@@ -260,6 +320,13 @@ class SubtitleStyleInterface(QWidget):
             FIF.FONT,  # type: ignore
             self.tr("主字幕字体"),
             self.tr("设置主字幕的字体"),
+            comboBoxClass=FontPreviewComboBox,
+        )
+        self.assPrimaryVariantCard = ComboBoxSettingCard(
+            FIF.FONT,
+            self.tr("主字幕变体"),
+            self.tr("选择常规、粗体、斜体等字体变体"),
+            comboBoxClass=FontPreviewComboBox,
         )
 
         self.assPrimarySizeCard = SpinBoxSettingCard(
@@ -307,6 +374,13 @@ class SubtitleStyleInterface(QWidget):
             FIF.FONT,  # type: ignore
             self.tr("副字幕字体"),
             self.tr("设置副字幕的字体"),
+            comboBoxClass=FontPreviewComboBox,
+        )
+        self.assSecondaryVariantCard = ComboBoxSettingCard(
+            FIF.FONT,
+            self.tr("副字幕变体"),
+            self.tr("选择常规、粗体、斜体等字体变体"),
+            comboBoxClass=FontPreviewComboBox,
         )
 
         self.assSecondarySizeCard = SpinBoxSettingCard(
@@ -354,6 +428,13 @@ class SubtitleStyleInterface(QWidget):
             FIF.FONT,  # type: ignore
             self.tr("字体"),
             self.tr("设置字幕字体"),
+            comboBoxClass=FontPreviewComboBox,
+        )
+        self.roundedVariantCard = ComboBoxSettingCard(
+            FIF.FONT,
+            self.tr("字体变体"),
+            self.tr("选择常规、粗体、斜体等字体变体"),
+            comboBoxClass=FontPreviewComboBox,
         )
 
         self.roundedFontSizeCard = SpinBoxSettingCard(
@@ -462,6 +543,7 @@ class SubtitleStyleInterface(QWidget):
 
         # ASS 样式卡片
         self.assPrimaryGroup.addSettingCard(self.assPrimaryFontCard)
+        self.assPrimaryGroup.addSettingCard(self.assPrimaryVariantCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimarySizeCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimarySpacingCard)
         self.assPrimaryGroup.addSettingCard(self.assPrimaryColorCard)
@@ -469,6 +551,7 @@ class SubtitleStyleInterface(QWidget):
         self.assPrimaryGroup.addSettingCard(self.assPrimaryOutlineSizeCard)
 
         self.assSecondaryGroup.addSettingCard(self.assSecondaryFontCard)
+        self.assSecondaryGroup.addSettingCard(self.assSecondaryVariantCard)
         self.assSecondaryGroup.addSettingCard(self.assSecondarySizeCard)
         self.assSecondaryGroup.addSettingCard(self.assSecondarySpacingCard)
         self.assSecondaryGroup.addSettingCard(self.assSecondaryColorCard)
@@ -477,6 +560,7 @@ class SubtitleStyleInterface(QWidget):
 
         # 圆角背景卡片
         self.roundedBgGroup.addSettingCard(self.roundedFontCard)
+        self.roundedBgGroup.addSettingCard(self.roundedVariantCard)
         self.roundedBgGroup.addSettingCard(self.roundedFontSizeCard)
         self.roundedBgGroup.addSettingCard(self.roundedTextColorCard)
         self.roundedBgGroup.addSettingCard(self.roundedBgColorCard)
@@ -532,41 +616,23 @@ class SubtitleStyleInterface(QWidget):
         # 设置字幕样式
         self.styleNameComboBox.comboBox.setCurrentText(cfg.get(cfg.subtitle_style_name))
 
-        # 获取字体列表（内置字体 + 系统字体）
-        builtin_fonts = get_builtin_fonts()
-        builtin_font_names = [f["name"] for f in builtin_fonts]
+        self._font_variants = get_font_variants()
 
-        fontDatabase = QFontDatabase()
-        fontFamilies = fontDatabase.families()
+        # 字体族和字体变体分两行显示。
+        for family_card, variant_card in (
+            (self.assPrimaryFontCard, self.assPrimaryVariantCard),
+            (self.assSecondaryFontCard, self.assSecondaryVariantCard),
+            (self.roundedFontCard, self.roundedVariantCard),
+        ):
+            self._populateFontFamilyCard(family_card)
+            self._populateFontVariantCard(family_card, variant_card)
 
-        # 过滤系统字体：
-        # 1. 排除私有字体（以 . 开头）
-        # 2. 排除已有的内置字体
-        # 3. 只保留 PIL 能实际加载的字体（用于圆角背景渲染）
-        system_fonts = []
-        for font_name in fontFamilies:
-            if font_name.startswith(".") or font_name in builtin_font_names:
-                continue
-            # 测试 PIL 是否能加载此字体
-            try:
-                ImageFont.truetype(font_name, 12)  # 测试用小尺寸
-                system_fonts.append(font_name)
-            except (OSError, IOError):
-                # PIL 无法加载，跳过此字体
-                pass
-
-        # 合并字体列表：内置字体在最前面
-        all_fonts = builtin_font_names + sorted(system_fonts)
-
-        # ASS 模式字体
-        self.assPrimaryFontCard.addItems(all_fonts)
-        self.assSecondaryFontCard.addItems(all_fonts)
         self.assPrimaryFontCard.comboBox.setMaxVisibleItems(12)
         self.assSecondaryFontCard.comboBox.setMaxVisibleItems(12)
-
-        # 圆角背景模式字体
-        self.roundedFontCard.addItems(all_fonts)
         self.roundedFontCard.comboBox.setMaxVisibleItems(12)
+        self.assPrimaryVariantCard.comboBox.setMaxVisibleItems(12)
+        self.assSecondaryVariantCard.comboBox.setMaxVisibleItems(12)
+        self.roundedVariantCard.comboBox.setMaxVisibleItems(12)
 
         # 设置圆角背景模式的初始值
         self.roundedFontSizeCard.spinBox.setValue(cfg.get(cfg.rounded_bg_font_size))
@@ -597,6 +663,78 @@ class SubtitleStyleInterface(QWidget):
         # 根据当前渲染模式显示/隐藏设置组
         self._updateVisibleGroups()
 
+    @staticmethod
+    def _qtFont(font_info):
+        font = QFontDatabase().font(
+            str(font_info["family_name"]), str(font_info["style_name"]), 12
+        )
+        return font if font and font.family() else QFont(str(font_info["family_name"]), 12)
+
+    def _populateFontFamilyCard(self, card):
+        combo = card.comboBox
+        combo.clear()
+        seen = set()
+        for font_info in self._font_variants:
+            family = str(font_info["family_name"])
+            if family in seen:
+                continue
+            seen.add(family)
+            combo.addItem(
+                family,
+                userData={"font": self._qtFont(font_info), "name": family},
+            )
+
+    def _populateFontVariantCard(self, family_card, variant_card, selected_name=None):
+        family = family_card.comboBox.currentText()
+        combo = variant_card.comboBox
+        combo.blockSignals(True)
+        combo.clear()
+        selected_index = 0
+        for font_info in self._font_variants:
+            if str(font_info["family_name"]) != family:
+                continue
+            combo.addItem(
+                str(font_info["style_name"]),
+                userData={
+                    "font": self._qtFont(font_info),
+                    "name": str(font_info["name"]),
+                },
+            )
+            if font_info["name"] == selected_name:
+                selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
+        combo.blockSignals(False)
+
+    @staticmethod
+    def _selectedFontName(variant_card):
+        data = variant_card.comboBox.currentData()
+        return str(data.get("name")) if isinstance(data, dict) else ""
+
+    def _setFontSelection(self, family_card, variant_card, font_name):
+        match = next(
+            (item for item in self._font_variants if item["name"] == font_name),
+            None,
+        )
+        if not match:
+            match = next(
+                (
+                    item
+                    for item in self._font_variants
+                    if item["family_name"] == font_name
+                    and str(item["style_name"]).casefold()
+                    in {"regular", "normal", "book", "roman"}
+                ),
+                None,
+            )
+        if not match:
+            return
+        family_card.setCurrentText(str(match["family_name"]))
+        self._populateFontVariantCard(family_card, variant_card, str(match["name"]))
+
+    def _onFontFamilyChanged(self, family_card, variant_card, callback):
+        self._populateFontVariantCard(family_card, variant_card)
+        callback()
+
     def connectSignals(self):
         """连接所有设置变更的信号到预览更新函数"""
         # 渲染模式切换
@@ -616,7 +754,14 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 主字幕样式
-        self.assPrimaryFontCard.currentTextChanged.connect(self.onAssSettingChanged)
+        self.assPrimaryFontCard.currentTextChanged.connect(
+            lambda _text: self._onFontFamilyChanged(
+                self.assPrimaryFontCard,
+                self.assPrimaryVariantCard,
+                self.onAssSettingChanged,
+            )
+        )
+        self.assPrimaryVariantCard.currentTextChanged.connect(self.onAssSettingChanged)
         self.assPrimarySizeCard.spinBox.valueChanged.connect(self.onAssSettingChanged)
         self.assPrimarySpacingCard.spinBox.valueChanged.connect(
             self.onAssSettingChanged
@@ -628,7 +773,14 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 副字幕样式
-        self.assSecondaryFontCard.currentTextChanged.connect(self.onAssSettingChanged)
+        self.assSecondaryFontCard.currentTextChanged.connect(
+            lambda _text: self._onFontFamilyChanged(
+                self.assSecondaryFontCard,
+                self.assSecondaryVariantCard,
+                self.onAssSettingChanged,
+            )
+        )
+        self.assSecondaryVariantCard.currentTextChanged.connect(self.onAssSettingChanged)
         self.assSecondarySizeCard.spinBox.valueChanged.connect(self.onAssSettingChanged)
         self.assSecondarySpacingCard.spinBox.valueChanged.connect(
             self.onAssSettingChanged
@@ -640,7 +792,16 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 圆角背景样式信号
-        self.roundedFontCard.currentTextChanged.connect(self.onRoundedBgSettingChanged)
+        self.roundedFontCard.currentTextChanged.connect(
+            lambda _text: self._onFontFamilyChanged(
+                self.roundedFontCard,
+                self.roundedVariantCard,
+                self.onRoundedBgSettingChanged,
+            )
+        )
+        self.roundedVariantCard.currentTextChanged.connect(
+            self.onRoundedBgSettingChanged
+        )
         self.roundedFontSizeCard.spinBox.valueChanged.connect(
             self.onRoundedBgSettingChanged
         )
@@ -723,7 +884,10 @@ class SubtitleStyleInterface(QWidget):
             return
 
         # 保存圆角背景配置
-        cfg.set(cfg.rounded_bg_font_name, self.roundedFontCard.comboBox.currentText())
+        cfg.set(
+            cfg.rounded_bg_font_name,
+            self._selectedFontName(self.roundedVariantCard),
+        )
         cfg.set(cfg.rounded_bg_font_size, self.roundedFontSizeCard.spinBox.value())
         cfg.set(
             cfg.rounded_bg_corner_radius, self.roundedCornerRadiusCard.spinBox.value()
@@ -841,7 +1005,13 @@ class SubtitleStyleInterface(QWidget):
         preview_image = (
             DEFAULT_BG_LANDSCAPE if orientation == "横屏" else DEFAULT_BG_PORTRAIT
         )
-        cfg.set(cfg.subtitle_preview_image, str(Path(preview_image["path"])))
+        current_path = Path(cfg.get(cfg.subtitle_preview_image))
+        default_paths = {
+            Path(DEFAULT_BG_LANDSCAPE["path"]),
+            Path(DEFAULT_BG_PORTRAIT["path"]),
+        }
+        if not current_path.is_file() or current_path in default_paths:
+            cfg.set(cfg.subtitle_preview_image, str(Path(preview_image["path"])))
         self.updatePreview()
 
     def onAssSettingChanged(self):
@@ -876,7 +1046,10 @@ class SubtitleStyleInterface(QWidget):
         vertical_spacing = self.assVerticalSpacingCard.spinBox.value()
 
         # 主字幕样式
-        primary_font = self.assPrimaryFontCard.comboBox.currentText()
+        primary_font = self._selectedFontName(self.assPrimaryVariantCard)
+        primary_font_name, primary_bold, primary_italic = get_font_ass_attributes(
+            primary_font
+        )
         primary_size = self.assPrimarySizeCard.spinBox.value()
 
         # 颜色转换为 ASS 格式 (AABBGGRR)
@@ -888,7 +1061,10 @@ class SubtitleStyleInterface(QWidget):
         primary_outline_size = self.assPrimaryOutlineSizeCard.spinBox.value()
 
         # 副字幕样式
-        secondary_font = self.assSecondaryFontCard.comboBox.currentText()
+        secondary_font = self._selectedFontName(self.assSecondaryVariantCard)
+        secondary_font_name, secondary_bold, secondary_italic = get_font_ass_attributes(
+            secondary_font
+        )
         secondary_size = self.assSecondarySizeCard.spinBox.value()
 
         secondary_color_hex = self.assSecondaryColorCard.colorPicker.color.name()
@@ -901,15 +1077,18 @@ class SubtitleStyleInterface(QWidget):
         secondary_outline_size = self.assSecondaryOutlineSizeCard.spinBox.value()
 
         # 生成样式字符串
-        primary_style = f"Style: Default,{primary_font},{primary_size},{primary_color},&H000000FF,{primary_outline_color},&H00000000,-1,0,0,0,100,100,{primary_spacing},0,1,{primary_outline_size},0,2,10,10,{vertical_spacing},1,\\q1"
-        secondary_style = f"Style: Secondary,{secondary_font},{secondary_size},{secondary_color},&H000000FF,{secondary_outline_color},&H00000000,-1,0,0,0,100,100,{secondary_spacing},0,1,{secondary_outline_size},0,2,10,10,{vertical_spacing},1,\\q1"
+        primary_style = f"Style: Default,{primary_font_name},{primary_size},{primary_color},&H000000FF,{primary_outline_color},&H00000000,{primary_bold},{primary_italic},0,0,100,100,{primary_spacing},0,1,{primary_outline_size},0,2,10,10,{vertical_spacing},1,\\q1"
+        secondary_style = f"Style: Secondary,{secondary_font_name},{secondary_size},{secondary_color},&H000000FF,{secondary_outline_color},&H00000000,{secondary_bold},{secondary_italic},0,0,100,100,{secondary_spacing},0,1,{secondary_outline_size},0,2,10,10,{vertical_spacing},1,\\q1"
 
         return f"[V4+ Styles]\n{style_format}\n{primary_style}\n{secondary_style}"
 
     def updatePreview(self):
         """更新预览图片"""
         # 获取预览文本
-        main_text, sub_text = PERVIEW_TEXTS[self.previewTextCard.comboBox.currentText()]
+        english_text, chinese_text = PERVIEW_TEXTS[
+            self.previewTextCard.comboBox.currentText()
+        ]
+        main_text, sub_text = english_text, chinese_text
 
         # 字幕布局
         layout = self.layoutCard.comboBox.currentText()
@@ -921,6 +1100,25 @@ class SubtitleStyleInterface(QWidget):
             main_text, sub_text = sub_text, None
         elif layout == "仅原文":
             main_text, sub_text = main_text, None
+
+        # 保留所有系统字体。若当前字体没有中文字符，则用对应英文样例
+        # 预览，避免 Windows 字体的缺字方框影响样式判断。
+        render_mode = self._getCurrentRenderMode()
+        if render_mode == SubtitleRenderModeEnum.ROUNDED_BG:
+            selected_fonts = (self._selectedFontName(self.roundedVariantCard),) * 2
+        else:
+            selected_fonts = (
+                self._selectedFontName(self.assPrimaryVariantCard),
+                self._selectedFontName(self.assSecondaryVariantCard),
+            )
+        if _contains_cjk(main_text) and not font_supports_text(
+            selected_fonts[0], main_text
+        ):
+            main_text = english_text
+        if sub_text and _contains_cjk(sub_text) and not font_supports_text(
+            selected_fonts[1], sub_text
+        ):
+            sub_text = english_text
 
         # 获取预览方向和背景
         orientation = self.orientationCard.comboBox.currentText()
@@ -935,16 +1133,17 @@ class SubtitleStyleInterface(QWidget):
         else:
             path = default_preview["path"]
 
-        # 根据渲染模式创建不同的预览线程（不传入尺寸，由渲染层自动从图片获取）
-        render_mode = self._getCurrentRenderMode()
+        canvas_size = _normalise_canvas(cfg.dubbing_canvas.value)
+        preview_width, preview_height = canvas_size or (None, None)
 
+        # 统一画布开启时，预览和最终压制使用相同的尺寸与样式缩放基准。
         if render_mode == SubtitleRenderModeEnum.ROUNDED_BG:
             # 圆角背景模式（样式720P基准，由渲染层自动缩放）
             bg_color = self.roundedBgColorCard.colorPicker.color
             bg_color_hex = f"#{bg_color.red():02x}{bg_color.green():02x}{bg_color.blue():02x}{bg_color.alpha():02x}"
 
             style = RoundedBgStyle(
-                font_name=self.roundedFontCard.comboBox.currentText(),
+                font_name=self._selectedFontName(self.roundedVariantCard),
                 font_size=self.roundedFontSizeCard.spinBox.value(),
                 bg_color=bg_color_hex,
                 text_color=self.roundedTextColorCard.colorPicker.color.name(),
@@ -959,6 +1158,8 @@ class SubtitleStyleInterface(QWidget):
             self.preview_thread = RoundedBgPreviewThread(
                 preview_text=(main_text, sub_text),
                 style=style,
+                width=preview_width,
+                height=preview_height,
                 bg_image_path=str(path),
             )
         else:
@@ -967,6 +1168,8 @@ class SubtitleStyleInterface(QWidget):
             self.preview_thread = AssPreviewThread(
                 preview_text=(main_text, sub_text),
                 style_str=style_str,
+                width=preview_width,
+                height=preview_height,
                 bg_image_path=str(path),
             )
 
@@ -1043,7 +1246,9 @@ class SubtitleStyleInterface(QWidget):
         style = SubtitleStyle.from_file(style_path)
 
         # Primary style
-        self.assPrimaryFontCard.setCurrentText(style.font_name)
+        self._setFontSelection(
+            self.assPrimaryFontCard, self.assPrimaryVariantCard, style.font_name
+        )
         self.assPrimarySizeCard.spinBox.setValue(style.font_size)
         self.assVerticalSpacingCard.spinBox.setValue(style.margin_bottom)
         self.assPrimaryColorCard.setColor(QColor(style.primary_color))
@@ -1054,7 +1259,9 @@ class SubtitleStyleInterface(QWidget):
         # Secondary style
         sec = style.secondary
         if sec:
-            self.assSecondaryFontCard.setCurrentText(sec.font_name)
+            self._setFontSelection(
+                self.assSecondaryFontCard, self.assSecondaryVariantCard, sec.font_name
+            )
             self.assSecondarySizeCard.spinBox.setValue(sec.font_size)
             self.assSecondaryColorCard.setColor(QColor(sec.color))
             self.assSecondaryOutlineColorCard.setColor(QColor(sec.outline_color))
@@ -1067,7 +1274,9 @@ class SubtitleStyleInterface(QWidget):
             data = json.load(f)
 
         if "font_name" in data:
-            self.roundedFontCard.setCurrentText(data["font_name"])
+            self._setFontSelection(
+                self.roundedFontCard, self.roundedVariantCard, data["font_name"]
+            )
         if "font_size" in data:
             self.roundedFontSizeCard.spinBox.setValue(data["font_size"])
         if "text_color" in data:
@@ -1148,7 +1357,7 @@ class SubtitleStyleInterface(QWidget):
         style = SubtitleStyle(
             name=style_id_from_filename(style_path.name),
             mode=StyleMode.ASS,
-            font_name=self.assPrimaryFontCard.comboBox.currentText(),
+            font_name=self._selectedFontName(self.assPrimaryVariantCard),
             font_size=self.assPrimarySizeCard.spinBox.value(),
             primary_color=self.assPrimaryColorCard.colorPicker.color.name(),
             outline_color=self.assPrimaryOutlineColorCard.colorPicker.color.name(),
@@ -1157,7 +1366,7 @@ class SubtitleStyleInterface(QWidget):
             spacing=self.assPrimarySpacingCard.spinBox.value(),
             margin_bottom=self.assVerticalSpacingCard.spinBox.value(),
             secondary=SecondaryStyle(
-                font_name=self.assSecondaryFontCard.comboBox.currentText(),
+                font_name=self._selectedFontName(self.assSecondaryVariantCard),
                 font_size=self.assSecondarySizeCard.spinBox.value(),
                 color=self.assSecondaryColorCard.colorPicker.color.name(),
                 outline_color=self.assSecondaryOutlineColorCard.colorPicker.color.name(),
@@ -1178,7 +1387,7 @@ class SubtitleStyleInterface(QWidget):
             "name": style_id_from_filename(style_path.name),
             "description": "",
             "mode": "rounded",
-            "font_name": self.roundedFontCard.comboBox.currentText(),
+            "font_name": self._selectedFontName(self.roundedVariantCard),
             "font_size": self.roundedFontSizeCard.spinBox.value(),
             "text_color": self.roundedTextColorCard.colorPicker.color.name(),
             "bg_color": bg_color_hex,

@@ -123,8 +123,10 @@ if _extra_paths:
 if (BIN_PATH / "vlc").exists():
     os.environ["PYTHON_VLC_MODULE_PATH"] = str(BIN_PATH / "vlc")
 
-# Hide subprocess console windows in frozen windowed builds.
-if sys.platform == "win32" and _IS_FROZEN:
+# Hide subprocess console windows in packaged and source GUI builds.
+if sys.platform == "win32" and (
+    _IS_FROZEN or Path(sys.executable).name.lower() == "pythonw.exe"
+):
     import subprocess as _sp
 
     _orig_popen_init = _sp.Popen.__init__

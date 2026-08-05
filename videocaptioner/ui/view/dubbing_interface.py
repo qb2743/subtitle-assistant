@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """配音界面 - 支持字幕文件配音和文案直接配音"""
 
-import tempfile
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QUrl
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -32,34 +31,28 @@ from qfluentwidgets import (
     ScrollArea,
     Slider,
     SpinBox,
-    SubtitleLabel,
     SwitchButton,
     ToolButton,
 )
 from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.config import BIN_PATH, CACHE_PATH
-from videocaptioner.core.dubbing.subtitle_parser import load_dubbing_segments
-
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
     INFOBAR_DURATION_SUCCESS,
     INFOBAR_DURATION_WARNING,
 )
+from videocaptioner.core.dubbing.subtitle_parser import load_dubbing_segments
 from videocaptioner.core.entities import SupportedSubtitleFormats
 from videocaptioner.core.speech.api_keys import parse_api_keys
 from videocaptioner.core.tts.local_tts_defaults import (
     DEFAULT_DOTS_PACKAGE_URL,
     DEFAULT_VOXCPM_PACKAGE_URL,
-    DOTS_TTS_PROJECT_URL,
-    PYVIDEOTRANS_F5_TTS_BUNDLE_URL,
-    PYVIDEOTRANS_F5TTS_TUTORIAL_URL,
-    VOXCPM_PROJECT_URL,
 )
 from videocaptioner.core.voices.loader import get_all_languages, get_voices_by_language
+from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.ApiKeysEditorDialog import ApiKeysEditorDialog
 from videocaptioner.ui.components.VoicePresetManagerDialog import VoicePresetManagerDialog
-from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.dubbing_config_builder import dubbing_api_key_attr
 from videocaptioner.ui.task_factory import resolve_dubbing_voice
 from videocaptioner.ui.thread.dubbing_interface_thread import DubbingInterfaceThread
@@ -257,9 +250,10 @@ class DubbingInterface(QWidget):
 
     finished = pyqtSignal(str)  # 输出文件路径
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, show_alignment_controls=False):
         super().__init__(parent)
         self.setObjectName("dubbingInterface")
+        self.show_alignment_controls = show_alignment_controls
         self.worker_thread = None
         self.quota_poll_timer = None  # 配额轮询定时器
         self.last_quota_percentage = 0  # 上次查询的配额百分比
@@ -269,6 +263,34 @@ class DubbingInterface(QWidget):
         self.setup_ui()
         self._connect_dubbing_auto_save()
         self.load_config()
+        if not self.show_alignment_controls:
+            self._hide_alignment_controls()
+
+    def _hide_alignment_controls(self):
+        """Keep video-processing settings out of the TTS-focused dubbing page."""
+        hidden_texts = {
+            "对齐控制", "视频变速:", "语音间隔:", "嵌入硬字幕:",
+            "画面效果", "随机镜像:", "随机调色:", "统一画布:",
+            "说话人", "说话人识别:", "说话人数上限:", "仅保留解说:",
+            "LLM 复核删行:", "背景音", "分离人声背景声:",
+            "重新嵌入背景声:", "背景音短时循环:", "背景音量:",
+            "额外背景音频:", "输出目录",
+        }
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, (BodyLabel, QLabel)) and widget.text() in hidden_texts:
+                widget.hide()
+        for name in (
+            "video_autorate_switch", "gap_ms_spin", "embed_combo",
+            "random_mirror_switch", "random_color_switch", "canvas_combo",
+            "diarization_switch", "speaker_count_combo", "narrator_only_switch",
+            "narrator_llm_review_switch", "separate_vocal_switch", "embed_bgm_switch",
+            "bgm_loop_switch", "bgm_volume_slider", "bgm_volume_spin",
+            "extra_bgm_edit", "extra_bgm_browse_btn", "extra_bgm_clear_btn",
+            "output_dir_edit", "output_dir_browse", "output_dir_clear",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.hide()
 
     def setup_ui(self):
         root_layout = QVBoxLayout(self)
@@ -642,6 +664,90 @@ class DubbingInterface(QWidget):
         embed_layout.addStretch()
         params_layout.addLayout(embed_layout)
 
+        # 画面效果（阶段4）
+        video_effects_title = BodyLabel("画面效果", self)
+        params_layout.addWidget(video_effects_title)
+
+        mirror_layout = QHBoxLayout()
+        mirror_layout.addWidget(BodyLabel("随机镜像:", self))
+        self.random_mirror_switch = SwitchButton(self)
+        self.random_mirror_switch.setToolTip("按场景切点随机左右镜像画面")
+        mirror_layout.addWidget(self.random_mirror_switch)
+        mirror_layout.addStretch()
+        params_layout.addLayout(mirror_layout)
+
+        color_layout = QHBoxLayout()
+        color_layout.addWidget(BodyLabel("随机调色:", self))
+        self.random_color_switch = SwitchButton(self)
+        self.random_color_switch.setToolTip("对画面应用轻微随机亮度、对比度和饱和度")
+        color_layout.addWidget(self.random_color_switch)
+        color_layout.addStretch()
+        params_layout.addLayout(color_layout)
+
+        canvas_layout = QHBoxLayout()
+        canvas_layout.addWidget(BodyLabel("统一画布:", self))
+        self.canvas_combo = ComboBox(self)
+        self.canvas_combo.addItem("关闭", "off")
+        self.canvas_combo.addItem("竖屏 1080x1920", "1080x1920")
+        self.canvas_combo.addItem("横屏 1920x1080", "1920x1080")
+        self.canvas_combo.setToolTip("缩放并填充到固定画布尺寸")
+        canvas_layout.addWidget(self.canvas_combo)
+        canvas_layout.addStretch()
+        params_layout.addLayout(canvas_layout)
+
+        # 说话人识别 / 解说过滤（阶段3）
+        speaker_title = BodyLabel("说话人", self)
+        params_layout.addWidget(speaker_title)
+
+        diarization_layout = QHBoxLayout()
+        diarization_layout.addWidget(BodyLabel("说话人识别:", self))
+        self.diarization_switch = SwitchButton(self)
+        self.diarization_switch.setToolTip(
+            "从视频音频识别说话人并分配到字幕行；需先选择视频，首次使用可能需要下载模型"
+        )
+        self.diarization_switch.checkedChanged.connect(
+            self._on_diarization_toggled
+        )
+        diarization_layout.addWidget(self.diarization_switch)
+        diarization_layout.addStretch()
+        params_layout.addLayout(diarization_layout)
+
+        speaker_count_layout = QHBoxLayout()
+        speaker_count_layout.addWidget(BodyLabel("说话人数上限:", self))
+        self.speaker_count_combo = ComboBox(self)
+        for count in (0, 2, 3, 4, 5, 6):
+            label = "不限（自动）" if count == 0 else f"{count} 人"
+            self.speaker_count_combo.addItem(label, count)
+        self.speaker_count_combo.setToolTip(
+            "不限表示自动聚类；也可以限制最多识别 2-6 人"
+        )
+        speaker_count_layout.addWidget(self.speaker_count_combo)
+        speaker_count_layout.addStretch()
+        params_layout.addLayout(speaker_count_layout)
+
+        narrator_layout = QHBoxLayout()
+        narrator_layout.addWidget(BodyLabel("仅保留解说:", self))
+        self.narrator_only_switch = SwitchButton(self)
+        self.narrator_only_switch.setToolTip(
+            "识别说话人后仅保留时长占比最高的主说话人字幕"
+        )
+        self.narrator_only_switch.checkedChanged.connect(
+            self._on_narrator_only_toggled
+        )
+        narrator_layout.addWidget(self.narrator_only_switch)
+        narrator_layout.addStretch()
+        params_layout.addLayout(narrator_layout)
+
+        narrator_review_layout = QHBoxLayout()
+        narrator_review_layout.addWidget(BodyLabel("LLM 复核删行:", self))
+        self.narrator_llm_review_switch = SwitchButton(self)
+        self.narrator_llm_review_switch.setToolTip(
+            "对解说过滤删除的字幕用 LLM 复核，避免误删；需配置 LLM"
+        )
+        narrator_review_layout.addWidget(self.narrator_llm_review_switch)
+        narrator_review_layout.addStretch()
+        params_layout.addLayout(narrator_review_layout)
+
         # 背景音
         bgm_title = BodyLabel("背景音", self)
         params_layout.addWidget(bgm_title)
@@ -842,6 +948,24 @@ class DubbingInterface(QWidget):
         path_layout.addWidget(browse_btn)
         api_layout.addLayout(path_layout)
 
+        output_dir_layout = QHBoxLayout()
+        output_dir_layout.addWidget(BodyLabel("输出目录", self))
+        self.output_dir_edit = LineEdit(self)
+        self.output_dir_edit.setPlaceholderText("留空：按输入文件自动生成")
+        self.output_dir_edit.setReadOnly(True)
+        self.output_dir_edit.setToolTip("配音音频、视频和 sidecar 文件统一保存到此目录")
+        self.output_dir_edit.textChanged.connect(self._persist_dubbing_settings)
+        output_dir_layout.addWidget(self.output_dir_edit, 1)
+        self.output_dir_browse = ToolButton(FIF.FOLDER, self)
+        self.output_dir_browse.setToolTip("选择输出目录")
+        self.output_dir_browse.clicked.connect(self._browse_output_dir)
+        output_dir_layout.addWidget(self.output_dir_browse)
+        self.output_dir_clear = ToolButton(FIF.DELETE, self)
+        self.output_dir_clear.setToolTip("清除输出目录")
+        self.output_dir_clear.clicked.connect(lambda: self.output_dir_edit.clear())
+        output_dir_layout.addWidget(self.output_dir_clear)
+        api_layout.addLayout(output_dir_layout)
+
         right_layout.addWidget(api_card)
 
         # 执行按钮
@@ -907,6 +1031,13 @@ class DubbingInterface(QWidget):
         self.video_autorate_switch.checkedChanged.connect(self._persist_dubbing_settings)
         self.gap_ms_spin.valueChanged.connect(self._persist_dubbing_settings)
         self.embed_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
+        self.random_mirror_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.random_color_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.canvas_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
+        self.diarization_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.speaker_count_combo.currentIndexChanged.connect(self._persist_dubbing_settings)
+        self.narrator_only_switch.checkedChanged.connect(self._persist_dubbing_settings)
+        self.narrator_llm_review_switch.checkedChanged.connect(self._persist_dubbing_settings)
         self.separate_vocal_switch.checkedChanged.connect(self._persist_dubbing_settings)
         self.embed_bgm_switch.checkedChanged.connect(self._persist_dubbing_settings)
         self.bgm_loop_switch.checkedChanged.connect(self._persist_dubbing_settings)
@@ -944,17 +1075,26 @@ class DubbingInterface(QWidget):
         cfg.dubbing_fixed_line_pause_ms.value = self.pause_ms_spin.value()
         cfg.dubbing_speed.value = self.speed_spin.value()
         cfg.dubbing_tts_workers.value = self.workers_spin.value()
-        cfg.dubbing_video_autorate.value = self.video_autorate_switch.isChecked()
-        cfg.dubbing_subtitle_gap_ms.value = self.gap_ms_spin.value()
-        embed_text = self.embed_combo.currentText()
-        cfg.dubbing_embed_subtitle.value = (
-            "hard" if embed_text == "烧录硬字幕" else "none"
-        )
-        cfg.dubbing_separate_vocal.value = self.separate_vocal_switch.isChecked()
-        cfg.dubbing_embed_bgm.value = self.embed_bgm_switch.isChecked()
-        cfg.dubbing_bgm_loop.value = self.bgm_loop_switch.isChecked()
-        cfg.dubbing_bgm_volume.value = self.bgm_volume_spin.value()
-        cfg.dubbing_extra_bgm_path.value = self.extra_bgm_edit.text().strip()
+        if self.show_alignment_controls:
+            cfg.dubbing_video_autorate.value = self.video_autorate_switch.isChecked()
+            cfg.dubbing_subtitle_gap_ms.value = self.gap_ms_spin.value()
+            embed_text = self.embed_combo.currentText()
+            cfg.dubbing_embed_subtitle.value = (
+                "hard" if embed_text == "烧录硬字幕" else "none"
+            )
+            cfg.dubbing_random_mirror.value = self.random_mirror_switch.isChecked()
+            cfg.dubbing_random_color.value = self.random_color_switch.isChecked()
+            cfg.dubbing_canvas.value = self.canvas_combo.currentData() or "off"
+            cfg.dubbing_enable_diarization.value = self.diarization_switch.isChecked()
+            cfg.dubbing_speaker_count.value = int(self.speaker_count_combo.currentData() or 0)
+            cfg.dubbing_narrator_only.value = self.narrator_only_switch.isChecked()
+            cfg.dubbing_narrator_llm_review.value = self.narrator_llm_review_switch.isChecked()
+            cfg.dubbing_separate_vocal.value = self.separate_vocal_switch.isChecked()
+            cfg.dubbing_embed_bgm.value = self.embed_bgm_switch.isChecked()
+            cfg.dubbing_bgm_loop.value = self.bgm_loop_switch.isChecked()
+            cfg.dubbing_bgm_volume.value = self.bgm_volume_spin.value()
+            cfg.dubbing_extra_bgm_path.value = self.extra_bgm_edit.text().strip()
+            cfg.dubbing_output_dir.value = self.output_dir_edit.text().strip()
         cfg.dubbing_api_base.value = self.api_base_edit.text()
         cfg.dubbing_clone_audio_path.value = self.clone_audio_edit.text().strip()
         cfg.dubbing_clone_audio_text.value = self.clone_text_edit.toPlainText().strip()
@@ -1041,17 +1181,19 @@ class DubbingInterface(QWidget):
         """保存音色列表到缓存文件"""
         try:
             import json
+
             from ...config import CACHE_PATH
             cache_file = CACHE_PATH / f"voices_{provider}.json"
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(voices, f, ensure_ascii=False, indent=2)
-        except Exception as e:
+        except Exception:
             pass
 
     def _load_voice_cache(self, provider: str) -> list:
         """从缓存文件加载音色列表"""
         try:
             import json
+
             from ...config import CACHE_PATH
             cache_file = CACHE_PATH / f"voices_{provider}.json"
             if cache_file.exists():
@@ -1086,8 +1228,6 @@ class DubbingInterface(QWidget):
         reset_unix = quota_info.get("next_character_count_reset_unix", 0)
         self.last_quota_info = quota_info
 
-        # 计算剩余配额
-        remaining = char_limit - char_count
         percentage = (char_count / char_limit * 100) if char_limit > 0 else 0
         self.last_quota_percentage = percentage
 
@@ -1108,15 +1248,16 @@ class DubbingInterface(QWidget):
 
     def _on_quota_query_error(self, error_msg: str):
         """配额查询失败"""
-        self.quota_label.setText(f"配额: 查询失败")
+        self.quota_label.setText("配额: 查询失败")
         self.reset_date_label.setText(f"错误: {error_msg}")
         self.quota_label.setStyleSheet("color: #999; font-size: 12px;")
         self.last_quota_info = None
 
     def _start_quota_polling(self, percentage: float, reset_unix: int):
         """启动配额轮询定时器"""
-        from PyQt5.QtCore import QTimer
         from datetime import datetime
+
+        from PyQt5.QtCore import QTimer
 
         # 停止旧的定时器
         if self.quota_poll_timer:
@@ -1197,11 +1338,25 @@ class DubbingInterface(QWidget):
         self.gap_ms_spin.setValue(int(cfg.dubbing_subtitle_gap_ms.value))
         embed_value = cfg.dubbing_embed_subtitle.value or "none"
         self.embed_combo.setCurrentIndex(1 if embed_value == "hard" else 0)
+        self.random_mirror_switch.setChecked(bool(cfg.dubbing_random_mirror.value))
+        self.random_color_switch.setChecked(bool(cfg.dubbing_random_color.value))
+        canvas_value = cfg.dubbing_canvas.value or "off"
+        canvas_index = self.canvas_combo.findData(canvas_value)
+        self.canvas_combo.setCurrentIndex(canvas_index if canvas_index >= 0 else 0)
+        self.diarization_switch.setChecked(bool(cfg.dubbing_enable_diarization.value))
+        saved_speaker_count = int(cfg.dubbing_speaker_count.value or 0)
+        speaker_index = self.speaker_count_combo.findData(saved_speaker_count)
+        self.speaker_count_combo.setCurrentIndex(speaker_index if speaker_index >= 0 else 0)
+        self.narrator_only_switch.setChecked(bool(cfg.dubbing_narrator_only.value))
+        self.narrator_llm_review_switch.setChecked(
+            bool(cfg.dubbing_narrator_llm_review.value)
+        )
         self.separate_vocal_switch.setChecked(cfg.dubbing_separate_vocal.value)
         self.embed_bgm_switch.setChecked(cfg.dubbing_embed_bgm.value)
         self.bgm_loop_switch.setChecked(cfg.dubbing_bgm_loop.value)
         self.bgm_volume_spin.setValue(float(cfg.dubbing_bgm_volume.value))
         self.extra_bgm_edit.setText(cfg.dubbing_extra_bgm_path.value or "")
+        self.output_dir_edit.setText(cfg.dubbing_output_dir.value or "")
         self._sync_api_key_display()
         self.api_base_edit.setText(cfg.dubbing_api_base.value)
         self.clone_audio_edit.setText(cfg.dubbing_clone_audio_path.value or "")
@@ -1260,6 +1415,14 @@ class DubbingInterface(QWidget):
         """重新嵌入背景声开关切换：同步背景音循环/音量可用性。"""
         self._update_param_controls_enabled()
 
+    def _on_diarization_toggled(self, checked):
+        """说话人识别开关切换：刷新依赖控件的可用性。"""
+        self._update_param_controls_enabled()
+
+    def _on_narrator_only_toggled(self, checked):
+        """解说过滤开关切换：LLM 复核仅在解说过滤开启时可用。"""
+        self._update_param_controls_enabled()
+
     def _update_param_controls_enabled(self):
         """根据固定停顿开关，刷新时间策略 / 停顿时长可用性。
 
@@ -1294,12 +1457,44 @@ class DubbingInterface(QWidget):
         self.embed_combo.setToolTip(
             "" if has_video else "烧录硬字幕需先选择视频文件"
         )
+        self.random_mirror_switch.setEnabled(has_video)
+        self.random_color_switch.setEnabled(has_video)
+        self.canvas_combo.setEnabled(has_video)
         # 固定停顿开启时 pipeline 忽略 SRT 时间轴，语音间隔(顺延)随其失效
         self.gap_ms_spin.setEnabled(not fixed_pause)
         self.gap_ms_spin.setToolTip(
             "开启固定停顿后，语音间隔将失效（行与行之间按固定间隔拼接）"
             if fixed_pause
             else "每条配音后插入静音，时间轴顺延；0=关闭"
+        )
+
+        # 说话人识别与解说过滤依赖视频输入；LLM 复核还依赖解说过滤。
+        has_video = bool(self.subtitle_input.get_video_path())
+        diarization_on = self.diarization_switch.isChecked()
+        self.diarization_switch.setEnabled(has_video)
+        self.diarization_switch.setToolTip(
+            "" if has_video else "说话人识别需先选择视频文件"
+        )
+        self.speaker_count_combo.setEnabled(has_video and diarization_on)
+        self.speaker_count_combo.setToolTip(
+            "不限表示自动聚类；也可以限制最多识别 2-6 人"
+            if has_video and diarization_on
+            else "开启说话人识别后可设置人数上限"
+        )
+        self.narrator_only_switch.setEnabled(has_video and diarization_on)
+        self.narrator_only_switch.setToolTip(
+            "识别说话人后仅保留主说话人字幕"
+            if has_video and diarization_on
+            else "需先开启说话人识别并选择视频"
+        )
+        narrator_on = self.narrator_only_switch.isChecked()
+        self.narrator_llm_review_switch.setEnabled(
+            has_video and diarization_on and narrator_on
+        )
+        self.narrator_llm_review_switch.setToolTip(
+            "对解说过滤删除的字幕用 LLM 复核"
+            if has_video and diarization_on and narrator_on
+            else "需先开启说话人识别和仅保留解说"
         )
 
         # 背景音：分离依赖视频；回嵌依赖视频或额外背景音频；循环/音量仅在回嵌开启时可用
@@ -1309,7 +1504,7 @@ class DubbingInterface(QWidget):
         self.separate_vocal_switch.setToolTip(
             "" if has_video else "需先选择视频文件"
         )
-        can_embed = has_video or has_extra_bgm
+        can_embed = (has_video and self.separate_vocal_switch.isChecked()) or has_extra_bgm
         self.embed_bgm_switch.setEnabled(can_embed)
         self.embed_bgm_switch.setToolTip(
             "" if can_embed else "需先选择视频或填写额外背景音频"
@@ -2047,6 +2242,12 @@ class DubbingInterface(QWidget):
         if file_path:
             self.output_edit.setText(file_path)
 
+    def _browse_output_dir(self):
+        """选择配音任务的统一输出目录。"""
+        directory = QFileDialog.getExistingDirectory(self, "选择输出目录", self.output_dir_edit.text())
+        if directory:
+            self.output_dir_edit.setText(directory)
+
     def _load_languages(self):
         """加载语言列表"""
         import logging
@@ -2562,8 +2763,9 @@ class DubbingInterface(QWidget):
     def cleanup_preview_files(self):
         """清理试听临时文件"""
         try:
-            from ...config import TEMP_PATH
             import shutil
+
+            from ...config import TEMP_PATH
             preview_dir = TEMP_PATH / "voice_preview"
             if preview_dir.exists():
                 shutil.rmtree(preview_dir)
@@ -2672,6 +2874,7 @@ class ElevenLabsAPITestThread(QThread):
         try:
             # 使用官方 elevenlabs 库
             from elevenlabs import ElevenLabs
+
             from videocaptioner.core.llm.request_logger import create_http_client
 
             # 创建客户端
@@ -2787,6 +2990,7 @@ class VoicePreviewThread(QThread):
 
             # 生成临时文件到配置的临时目录
             import os
+
             from ...config import TEMP_PATH
             preview_dir = TEMP_PATH / "voice_preview"
             preview_dir.mkdir(parents=True, exist_ok=True)
@@ -2818,8 +3022,9 @@ class VoicePreviewThread(QThread):
 
     def _generate_edge_tts(self, text: str, output_file: str):
         """使用 Edge TTS 生成音频"""
-        import edge_tts
         import asyncio
+
+        import edge_tts
 
         async def generate():
             communicate = edge_tts.Communicate(text, self.voice_id)
@@ -2833,6 +3038,7 @@ class VoicePreviewThread(QThread):
             raise ValueError("ElevenLabs 需要 API Key")
 
         from elevenlabs import ElevenLabs
+
         from videocaptioner.core.llm.request_logger import create_http_client
         client = ElevenLabs(api_key=self.api_key, httpx_client=create_http_client())
         model_id = self.model_id if self.model_id else "eleven_flash_v2_5"
@@ -2856,6 +3062,7 @@ class VoicePreviewThread(QThread):
             raise ValueError("OpenAI 需要 API Key")
 
         from openai import OpenAI
+
         from videocaptioner.core.llm.request_logger import create_http_client
         client = OpenAI(
             api_key=self.api_key,
@@ -2876,8 +3083,8 @@ class VoicePreviewThread(QThread):
         if not self.api_key:
             raise ValueError("Fish Audio 需要 API Key")
 
-        from videocaptioner.core.speech.providers import FishAudioSpeechSynthesizer
         from videocaptioner.core.speech.models import SpeechProviderConfig, SynthesisRequest
+        from videocaptioner.core.speech.providers import FishAudioSpeechSynthesizer
 
         config = SpeechProviderConfig(
             provider="fishaudio",
@@ -2909,6 +3116,7 @@ class ElevenLabsQuotaThread(QThread):
         """查询配额"""
         try:
             from elevenlabs import ElevenLabs
+
             from videocaptioner.core.llm.request_logger import create_http_client
             client = ElevenLabs(api_key=self.api_key, httpx_client=create_http_client())
             subscription = client.user.subscription.get()

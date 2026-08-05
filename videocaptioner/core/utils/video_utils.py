@@ -394,7 +394,7 @@ def get_video_info(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             ),
         )
-        info = result.stderr
+        info = result.stderr or ""
 
         # 提取时长
         duration_seconds = 0.0

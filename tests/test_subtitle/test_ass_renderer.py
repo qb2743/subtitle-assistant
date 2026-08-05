@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from videocaptioner.core.subtitle import ass_renderer
+from videocaptioner.core.subtitle import ass_renderer, font_utils
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +54,29 @@ def test_render_ass_preview_quotes_ffmpeg_filter_paths(monkeypatch, tmp_path):
     vf_index = cmd.index("-vf")
     vf_value = cmd[vf_index + 1]
 
-    assert vf_value.startswith("ass='"), f"ass path is not single-quoted: {vf_value}"
+    assert vf_value.startswith("scale=320:180"), vf_value
+    assert ",ass='" in vf_value, f"ass path is not single-quoted: {vf_value}"
     assert "':fontsdir='" in vf_value, f"fontsdir is not single-quoted: {vf_value}"
     assert vf_value.endswith("'"), f"fontsdir path is not closed: {vf_value}"
+
+
+def test_font_variants_map_to_ass_flags(monkeypatch):
+    monkeypatch.setattr(
+        font_utils,
+        "_find_font_record",
+        lambda name: {"family_name": "Arial", "style_name": name.rsplit("/", 1)[-1]},
+    )
+
+    assert font_utils.get_font_ass_attributes("Arial / Regular") == ("Arial", 0, 0)
+    assert font_utils.get_font_ass_attributes("Arial / Bold") == ("Arial", -1, 0)
+    assert font_utils.get_font_ass_attributes("Arial / Italic") == ("Arial", 0, -1)
+
+
+def test_get_video_resolution_handles_empty_ffmpeg_output(monkeypatch):
+    monkeypatch.setattr(
+        ass_renderer.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, None, None),
+    )
+
+    assert ass_renderer._get_video_resolution("missing.mp4") == (1920, 1080)

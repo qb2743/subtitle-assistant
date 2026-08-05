@@ -78,12 +78,14 @@ class BatchProcessInterface(QWidget):
             str(BatchTaskType.DUBBING): self.tr("为字幕文件生成配音音轨"),
             str(BatchTaskType.TRANS_SUB): self.tr("先转录再处理字幕，不合成视频"),
             str(BatchTaskType.FULL_PROCESS): self.tr("转录 → 字幕处理 → 合成视频"),
+            str(BatchTaskType.VIDEO_TRANSLATION): self.tr("视频转录 → 说话人筛选 → 翻译 → 配音对齐"),
         }
 
         # 控制按钮
         self.add_file_btn = PushButton(self.tr("添加文件"), icon=FIF.ADD)
         self.start_all_btn = PushButton(self.tr("开始处理"), icon=FIF.PLAY)
         self.clear_btn = PushButton(self.tr("清空列表"), icon=FIF.DELETE)
+        self.clear_btn.setToolTip(self.tr("停止全部任务并清空列表"))
 
         # 添加到顶部布局
         top_layout.addWidget(self.task_type_combo)
@@ -143,9 +145,12 @@ class BatchProcessInterface(QWidget):
         self.task_table.customContextMenuRequested.connect(self.show_context_menu)
 
     def on_add_file_clicked(self):
-        task_type = self.task_type_combo.currentText()
+        task_type = BatchTaskType(self.task_type_combo.currentText())
         file_filter = ""
-        if task_type in [
+        if task_type == BatchTaskType.VIDEO_TRANSLATION:
+            video_formats = [f"*.{fmt.value}" for fmt in SupportedVideoFormats]
+            file_filter = f"视频文件 ({' '.join(video_formats)})"
+        elif task_type in [
             BatchTaskType.TRANSCRIBE,
             BatchTaskType.TRANS_SUB,
             BatchTaskType.FULL_PROCESS,
@@ -266,7 +271,9 @@ class BatchProcessInterface(QWidget):
         valid_extensions = {}
 
         # 根据任务类型设置有效的扩展名
-        if task_type in [
+        if task_type == BatchTaskType.VIDEO_TRANSLATION:
+            valid_extensions = {f".{fmt.value}" for fmt in SupportedVideoFormats}
+        elif task_type in [
             BatchTaskType.TRANSCRIBE,
             BatchTaskType.TRANS_SUB,
             BatchTaskType.FULL_PROCESS,

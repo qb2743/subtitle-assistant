@@ -38,3 +38,28 @@ def test_edge_tts_synthesizer_writes_mp3(tmp_path, monkeypatch):
     assert result.voice == "zh-CN-XiaoxiaoNeural"
     assert FakeCommunicate.calls[-1]["rate"] == "+20%"
     assert FakeCommunicate.calls[-1]["volume"] == "-10%"
+
+
+def test_edge_tts_retries_transient_server_error(tmp_path, monkeypatch):
+    class TemporaryError(Exception):
+        status = 503
+
+    class FlakyCommunicate(FakeCommunicate):
+        attempts = 0
+
+        async def save(self, audio_fname):
+            self.__class__.attempts += 1
+            if self.attempts < 3:
+                raise TemporaryError("service unavailable")
+            Path(audio_fname).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("videocaptioner.core.speech.providers.edge_tts.Communicate", FlakyCommunicate)
+    monkeypatch.setattr("videocaptioner.core.speech.providers.time.sleep", lambda _delay: None)
+    config = SpeechProviderConfig(provider="edge", api_key="", model="edge-tts")
+
+    result = EdgeTTSSpeechSynthesizer(config).synthesize(
+        SynthesisRequest(text="hello", output_path=str(tmp_path / "line.wav"))
+    )
+
+    assert FlakyCommunicate.attempts == 3
+    assert Path(result.output_path).read_bytes() == b"fake-mp3"

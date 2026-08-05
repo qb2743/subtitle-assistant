@@ -20,9 +20,11 @@ class TranscriptThread(QThread):
     def __init__(self, task: TranscribeTask):
         super().__init__()
         self.task = task
+        self._cancelled = False
 
     def run(self):
         try:
+            self._raise_if_cancelled()
             self.task.started_at = datetime.datetime.now()
             logger.info(f"\n{self.task.transcribe_config.print_config()}")
 
@@ -35,6 +37,8 @@ class TranscriptThread(QThread):
             self._perform_transcription()
 
         except Exception as e:
+            if self._cancelled:
+                return
             logger.exception("转录过程中发生错误: %s", str(e))
             self.error.emit(str(e))
             self.progress.emit(100, self.tr("转录失败"))
@@ -103,6 +107,7 @@ class TranscriptThread(QThread):
             if not is_success:
                 logger.error("音频转换失败")
                 raise RuntimeError(self.tr("音频转换失败"))
+            self._raise_if_cancelled()
 
             self.progress.emit(20, self.tr("语音转录中"))
             logger.info("开始语音转录")
@@ -113,6 +118,7 @@ class TranscriptThread(QThread):
                 self.task.transcribe_config,
                 callback=self.progress_callback,
             )
+            self._raise_if_cancelled()
 
             # 保存字幕文件（根据配置的输出格式）
             output_path = Path(self.task.output_path)
@@ -145,5 +151,15 @@ class TranscriptThread(QThread):
             Path(temp_audio_path).unlink(missing_ok=True)
 
     def progress_callback(self, value, message):
+        self._raise_if_cancelled()
         progress = min(20 + (value * 0.8), 100)
         self.progress.emit(int(progress), message)
+
+    def cancel(self):
+        logger.info("请求取消转录任务")
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _raise_if_cancelled(self):
+        if self._cancelled or self.isInterruptionRequested():
+            raise RuntimeError("任务已取消")

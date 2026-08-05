@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -5,7 +7,62 @@ from pydub import AudioSegment
 from videocaptioner.core.dubbing import DubbingConfig, DubbingPipeline
 from videocaptioner.core.dubbing.models import elevenlabs_concurrent_per_key
 from videocaptioner.core.dubbing.pipeline import default_dubbed_audio_path, resolve_tts_worker_count
+from videocaptioner.core.entities import SubtitleLayoutEnum, SubtitleRenderModeEnum
 from videocaptioner.core.speech import SynthesisResult
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FFMPEG = str(PROJECT_ROOT / "ffmpeg.exe") if (PROJECT_ROOT / "ffmpeg.exe").is_file() else "ffmpeg"
+FFPROBE = str(PROJECT_ROOT / "ffprobe.exe") if (PROJECT_ROOT / "ffprobe.exe").is_file() else "ffprobe"
+
+
+def _make_test_video(path: Path, duration: int = 2) -> None:
+    subprocess.run(
+        [
+            FFMPEG,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=blue:s=320x240:d={duration}:r=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(path),
+        ],
+        check=True,
+    )
+
+
+def _video_dimensions(path: Path) -> tuple[int, int]:
+    result = subprocess.run(
+        [
+            FFPROBE,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    width, height = result.stdout.strip().split(",")
+    return int(width), int(height)
 
 
 class FakeSynthesizer:
@@ -270,3 +327,155 @@ def test_dubbing_pipeline_silences_failed_segment_and_continues(tmp_path, monkey
     assert "静音占位" in failed[0].warning
     # A matching warning was surfaced in the result.
     assert any("字幕段 2" in w and "静音占位" in w for w in result.warnings)
+
+
+def test_pipeline_real_video_filters_and_output_dir(tmp_path, monkeypatch):
+    srt = tmp_path / "input.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nOne\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nTwo\n",
+        encoding="utf-8",
+    )
+    video = tmp_path / "input.mp4"
+    _make_test_video(video)
+    output_dir = tmp_path / "rendered"
+
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: FakeSynthesizer(),
+    )
+    config = DubbingConfig(
+        provider="gemini",
+        api_key="test",
+        base_url="",
+        model="gemini-3.1-flash-tts-preview",
+        voice="Kore",
+        random_color=True,
+        canvas="1080x1920",
+        output_dir=str(output_dir),
+    )
+
+    result = DubbingPipeline(config).run(
+        str(srt),
+        str(tmp_path / "requested.wav"),
+        video_path=str(video),
+        work_dir=str(tmp_path / "parts"),
+    )
+
+    assert result.audio_path.parent == output_dir
+    assert result.video_path is not None and result.video_path.parent == output_dir
+    assert result.audio_path.is_file()
+    assert result.video_path.is_file()
+    assert _video_dimensions(result.video_path) == (1080, 1920)
+
+
+def test_pipeline_diarization_writes_sidecars_and_llm_restores(tmp_path, monkeypatch):
+    srt = tmp_path / "input.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n旁白一\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
+        "3\n00:00:02,000 --> 00:00:03,000\n旁白二\n",
+        encoding="utf-8",
+    )
+    video = tmp_path / "input.mp4"
+    _make_test_video(video, duration=3)
+    output_dir = tmp_path / "rendered"
+    seen_languages = []
+
+    def fake_diarize(
+        audio_path,
+        num_speakers=0,
+        language="zh",
+        progress=None,
+        isolate_process=False,
+    ):
+        seen_languages.append(language)
+        if progress:
+            progress(100, "done")
+        return [
+            {"start": 0.0, "end": 1.0, "speaker": "spk0"},
+            {"start": 1.0, "end": 2.0, "speaker": "spk1"},
+            {"start": 2.0, "end": 3.0, "speaker": "spk0"},
+        ]
+
+    monkeypatch.setattr("videocaptioner.core.diarization.diarize", fake_diarize)
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.narrator_llm_judge.judge_dropped",
+        lambda *args, **kwargs: [0],
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: FakeSynthesizer(),
+    )
+    config = DubbingConfig(
+        provider="gemini",
+        api_key="test",
+        base_url="",
+        model="gemini-3.1-flash-tts-preview",
+        voice="Kore",
+        enable_diarization=True,
+        diarization_language="en",
+        narrator_only=True,
+        narrator_llm_review=True,
+        llm_api_key="llm-key",
+        llm_api_base="https://example.invalid/v1",
+        llm_model="test-model",
+        output_dir=str(output_dir),
+    )
+
+    result = DubbingPipeline(config).run(
+        str(srt),
+        str(tmp_path / "requested.wav"),
+        video_path=str(video),
+        work_dir=str(tmp_path / "parts"),
+    )
+
+    speaker_sidecar = output_dir / "requested.speaker.json"
+    dropped_sidecar = output_dir / "requested.narrator_dropped.srt"
+    assert seen_languages == ["en"]
+    assert json.loads(speaker_sidecar.read_text(encoding="utf-8")) == [
+        "spk0",
+        "spk1",
+        "spk0",
+    ]
+    assert dropped_sidecar.is_file()
+    assert len(result.segments) == 3
+    assert result.video_path is not None and result.video_path.is_file()
+
+
+def test_burn_subtitles_uses_configured_style(tmp_path, monkeypatch):
+    srt = tmp_path / "input.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nStyled\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_styled(video_path, asr_data, output_path, render_mode, layout, **kwargs):
+        calls.append((video_path, output_path, render_mode, layout, kwargs))
+
+    monkeypatch.setattr(
+        "videocaptioner.core.utils.video_utils.add_subtitles_with_style", fake_styled
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.utils.video_utils.add_subtitles",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy path used")),
+    )
+    config = DubbingConfig(
+        provider="edge",
+        api_key="",
+        base_url="",
+        model="edge-tts",
+        subtitle_render_mode=SubtitleRenderModeEnum.ROUNDED_BG,
+        subtitle_layout=SubtitleLayoutEnum.ONLY_ORIGINAL,
+        subtitle_rounded_style={"font_size": 32},
+    )
+
+    DubbingPipeline(config)._burn_subtitles(
+        "input.mp4", str(srt), "output.mp4"
+    )
+
+    assert len(calls) == 1
+    assert calls[0][2] == SubtitleRenderModeEnum.ROUNDED_BG
+    assert calls[0][3] == SubtitleLayoutEnum.ONLY_ORIGINAL
+    assert calls[0][4]["rounded_style"] == {"font_size": 32}

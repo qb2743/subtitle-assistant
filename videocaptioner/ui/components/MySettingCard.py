@@ -202,11 +202,12 @@ class ComboBoxSettingCard(SettingCard):
         content: Optional[str] = None,
         texts: Optional[List[str]] = None,
         parent=None,
+        comboBoxClass=ComboBox,
     ):
         super().__init__(icon, title, content, parent)
 
         # 创建ComboBox
-        self.comboBox = ComboBox(self)
+        self.comboBox = comboBoxClass(self)
         self.hBoxLayout.addWidget(self.comboBox, 0, Qt.AlignRight)  # type: ignore
         self.hBoxLayout.addSpacing(16)
 

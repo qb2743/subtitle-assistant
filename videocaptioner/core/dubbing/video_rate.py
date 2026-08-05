@@ -1,4 +1,4 @@
-"""Per-segment video rate change (slow-down) to match an overflowing audio track.
+"""Per-segment video rate change to match a dubbed audio track.
 
 A simplified port of pyVideoTrans ``task/_rate.py``. There is no rubberband and
 no multiprocessing: we cut the video into contiguous intervals, apply a single
@@ -78,11 +78,10 @@ def compute_rate_plan(
     tail ``[e_last, V)``. Zero-length intervals are skipped. Every interval is
     kept in the plan, so no picture is ever dropped.
 
-    For a slot whose audio is longer than the slot, the picture slows down:
-    ``pts_factor = min(d_i / slot_len, max_slowdown)``; otherwise it plays at
-    normal speed (``pts_factor == 1.0``). After each slot a frozen frame of
-    ``gap_ms`` is appended (``pad_after_ms``) so the picture and the audio stop
-    at the same instant.
+    Each subtitle owns the source interval from its start to the next subtitle
+    start (the final subtitle owns the remaining video). The interval is sped up
+    or slowed down to ``dub duration + gap_ms``. This matches pyVideoTrans and
+    removes long source pauses left by filtered dialogue lines.
 
     When even the maximum slow-down cannot fit the audio
     (``d_i > slot_len * max_slowdown``), the audio itself must be compressed a
@@ -104,34 +103,39 @@ def compute_rate_plan(
         ``extra_tempo[i]`` is the tempo-compression factor for that dub
         (``1.0`` when no second compression is needed).
     """
-    extra_tempo: List[float] = [1.0] * len(slots)
-    for i, (s, e) in enumerate(slots):
-        slot_len = e - s
-        d_i = audio_durations_ms[i]
-        if slot_len > 0 and d_i > slot_len * max_slowdown:
-            extra_tempo[i] = d_i / (slot_len * max_slowdown)
+    count = min(len(slots), len(audio_durations_ms))
+    if count == 0:
+        return RatePlan(), [], []
 
-    # Assemble contiguous source intervals: (start, end, pts, pad_after, slot_idx).
+    max_rate = max(1.0, float(max_slowdown))
+    gap_ms = max(0, int(gap_ms))
+    extra_tempo: List[float] = [1.0] * count
     intervals: List[List] = []
-    slot_interval_idx: List[int] = []
-    if slots and slots[0][0] > 0:
-        intervals.append([0, slots[0][0], 1.0, 0, -1])
-    for i, (s, e) in enumerate(slots):
-        slot_len = e - s
-        d_i = audio_durations_ms[i]
-        if slot_len <= 0 or d_i <= slot_len:
-            pts = 1.0
+    first_start = max(0, int(slots[0][0]))
+    if first_start > 0:
+        intervals.append([0, first_start, 1.0, 0, -1])
+
+    for i in range(count):
+        start = max(0, int(slots[i][0]))
+        if i + 1 < count:
+            end = max(start + 1, int(slots[i + 1][0]))
         else:
-            pts = min(d_i / slot_len, max_slowdown)
-        intervals.append([s, e, pts, gap_ms, i])
-        slot_interval_idx.append(len(intervals) - 1)
-        if i + 1 < len(slots):
-            next_start = slots[i + 1][0]
-            if next_start > e:
-                intervals.append([e, next_start, 1.0, 0, -1])
-    last_e = slots[-1][1] if slots else 0
-    if video_duration_ms > last_e:
-        intervals.append([last_e, video_duration_ms, 1.0, 0, -1])
+            end = max(start + 1, int(slots[i][1]), int(video_duration_ms))
+        source_duration = end - start
+        max_target = source_duration * max_rate
+        min_target = source_duration / max_rate
+        effective_gap = min(gap_ms, max(0, int(max_target) - 100))
+        audio_duration = max(1, int(audio_durations_ms[i]))
+        available_audio = max(1, max_target - effective_gap)
+        if audio_duration > available_audio:
+            extra_tempo[i] = audio_duration / available_audio
+        effective_audio = audio_duration / extra_tempo[i]
+        target_duration = min(
+            max(effective_audio + effective_gap, min_target), max_target
+        )
+        intervals.append(
+            [start, end, target_duration / source_duration, 0, i]
+        )
 
     # Convert intervals to plan items, tracking each slot's output start.
     items: List[RatePlanItem] = []
@@ -140,17 +144,17 @@ def compute_rate_plan(
     for s, e, pts, pad, slot_idx in intervals:
         out_dur = (e - s) * pts
         if slot_idx >= 0:
-            slot_output_starts[slot_idx] = int(cursor)
+            slot_output_starts[slot_idx] = cursor
         items.append(
             RatePlanItem(start_ms=s, end_ms=e, pts_factor=pts, pad_after_ms=pad)
         )
         cursor += out_dur + pad
-    total_output_duration_ms = int(cursor)
+    total_output_duration_ms = round(cursor)
 
     # Audio placements derived from the plan's output timeline.
     placements: List[Tuple[int, int]] = []
     for i in range(len(slots)):
-        start = slot_output_starts[i]
+        start = round(slot_output_starts[i])
         audio_eff = round(audio_durations_ms[i] / extra_tempo[i])
         placements.append((start, start + audio_eff))
 
@@ -228,6 +232,7 @@ def apply_video_rate(
             clip = work / f"clip_{i:04d}.mp4"
             start_s = item.start_ms / 1000.0
             dur_s = (item.end_ms - item.start_ms) / 1000.0
+            target_s = dur_s * item.pts_factor + item.pad_after_ms / 1000.0
             filters = [f"setpts={item.pts_factor:.6f}*PTS"]
             if item.pad_after_ms > 0:
                 filters.append(
@@ -260,6 +265,8 @@ def apply_video_rate(
                     "vfr",
                     "-vf",
                     ",".join(filters),
+                    "-t",
+                    f"{target_s:.6f}",
                     str(clip),
                 ]
             )

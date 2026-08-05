@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from pydub import AudioSegment
+from pydub.silence import detect_nonsilent
 
 # On Windows, suppress "Application Error" crash dialogs for ffmpeg/ffprobe
 _SUBPROCESS_KWARGS: dict = {}
@@ -25,6 +26,28 @@ for _attr, _name in (("converter", "ffmpeg"), ("ffprobe", "ffprobe")):
 def get_audio_duration_ms(path: str) -> int:
     audio = AudioSegment.from_file(path)
     return len(audio)
+
+
+def trim_trailing_silence(
+    input_path: str,
+    output_path: str,
+    *,
+    min_silence_len: int = 100,
+    silence_thresh: int = -45,
+) -> str:
+    """Remove only synthetic silence at the end of a TTS clip."""
+    audio = AudioSegment.from_file(input_path)
+    nonsilent = detect_nonsilent(
+        audio,
+        min_silence_len=min_silence_len,
+        silence_thresh=silence_thresh,
+        seek_step=10,
+    )
+    if not nonsilent or len(audio) - nonsilent[-1][1] <= 30:
+        return input_path
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    audio[: nonsilent[-1][1]].export(output_path, format="wav")
+    return output_path
 
 
 def create_silence_file(output_path: str, duration_ms: int) -> str:

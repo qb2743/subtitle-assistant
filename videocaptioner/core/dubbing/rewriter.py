@@ -6,7 +6,6 @@ from typing import Iterable
 from openai import OpenAI
 
 from videocaptioner.core.llm.request_logger import create_http_client
-
 from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
 from .models import DubbingConfig, DubbingSegment

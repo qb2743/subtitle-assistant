@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from videocaptioner.config import MODEL_PATH
+from videocaptioner.core.diarization.speaker_diarizer import _native_model_path
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.model_downloader import ModelDownloader
 from videocaptioner.core.utils.model_urls import (
@@ -188,7 +189,7 @@ def separate_vocals(
     separation_config = sherpa_onnx.OfflineSourceSeparationConfig(
         model=sherpa_onnx.OfflineSourceSeparationModelConfig(
             uvr=sherpa_onnx.OfflineSourceSeparationUvrModelConfig(
-                model=str(model_path),
+                model=_native_model_path(model_path),
             ),
             num_threads=4,
             debug=False,

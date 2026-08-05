@@ -21,7 +21,7 @@ def _make_wav(path, seconds=1.0, sr=44100):
     sf.write(str(path), samples, sr)
 
 
-def _install_fake_sherpa(monkeypatch, process_recorder=None):
+def _install_fake_sherpa(monkeypatch, process_recorder=None, model_recorder=None):
     """Install a fake ``sherpa_onnx`` module into ``sys.modules``."""
 
     class FakeStem:
@@ -55,7 +55,9 @@ def _install_fake_sherpa(monkeypatch, process_recorder=None):
     fake = type(sys)("sherpa_onnx")
     fake.OfflineSourceSeparationConfig = lambda **kw: FakeConfig()
     fake.OfflineSourceSeparationModelConfig = lambda **kw: FakeConfig()
-    fake.OfflineSourceSeparationUvrModelConfig = lambda **kw: FakeConfig()
+    fake.OfflineSourceSeparationUvrModelConfig = lambda **kw: (
+        model_recorder.update(kw) if model_recorder is not None else None
+    ) or FakeConfig()
     fake.OfflineSourceSeparation = FakeSeparator
     monkeypatch.setitem(sys.modules, "sherpa_onnx", fake)
     return fake
@@ -102,7 +104,11 @@ def test_separation_call_args_and_outputs(monkeypatch, tmp_path):
     (sep_dir / "UVR-MDX-NET-Inst_HQ_4.onnx").write_bytes(b"x")
 
     recorder = {}
-    _install_fake_sherpa(monkeypatch, process_recorder=recorder)
+    model_recorder = {}
+    monkeypatch.setattr(vs, "_native_model_path", lambda _path: "ascii/model.onnx")
+    _install_fake_sherpa(
+        monkeypatch, process_recorder=recorder, model_recorder=model_recorder
+    )
 
     wav = tmp_path / "in.wav"
     _make_wav(wav, seconds=1.0, sr=44100)
@@ -112,6 +118,7 @@ def test_separation_call_args_and_outputs(monkeypatch, tmp_path):
     # 分离调用:采样率 44100,样本为 (num_channels, num_samples)。
     assert recorder["sample_rate"] == 44100
     assert recorder["samples_shape"] == (2, 44100)
+    assert model_recorder["model"] == "ascii/model.onnx"
     # 输出文件均存在且非空。
     assert vocal == str(work / "vocal.wav")
     assert instrument == str(work / "instrument.wav")

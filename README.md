@@ -44,6 +44,9 @@ python -m videocaptioner.ui.main
 
 窗口标题：**字幕助手 v1.0**。
 
+配音页包含视频变速、语音间隔、硬字幕、背景音分离/回嵌、说话人过滤、画面效果和自定义输出目录等视频对齐设置。完整配置说明见
+[docs/DUBBING_ALIGNMENT.md](docs/DUBBING_ALIGNMENT.md)。
+
 ---
 
 ## 命令行（CLI）

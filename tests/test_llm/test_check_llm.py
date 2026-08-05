@@ -2,9 +2,16 @@
 
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
-from videocaptioner.core.llm.check_llm import check_llm_connection, _extract_response_content, _parse_sse_string
+from videocaptioner.core.llm.check_llm import (
+    LLM_CHECK_MAX_RETRIES,
+    _extract_response_content,
+    _parse_sse_string,
+    check_llm_connection,
+)
 
 
 class FakeChatCompletions:
@@ -60,6 +67,50 @@ def test_check_llm_connection_rejects_empty_response(monkeypatch):
     ok, msg = check_llm_connection("http://fake/v1", "sk-fake", "gpt-4")
     assert ok is False
     assert "Invalid API response" in msg
+
+
+def test_check_llm_connection_has_bounded_timeout_and_retries(monkeypatch):
+    captured = {}
+
+    def fake_openai(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeOpenAIClient(FakeChatCompletion("Hello"))
+
+    monkeypatch.setattr(
+        "videocaptioner.core.llm.check_llm.create_http_client",
+        lambda timeout: captured.setdefault("http_timeout", timeout),
+    )
+    monkeypatch.setattr("videocaptioner.core.llm.check_llm.openai.OpenAI", fake_openai)
+
+    ok, _ = check_llm_connection("http://fake/v1", "sk-fake", "gpt-4")
+
+    assert ok is True
+    assert captured["timeout"] == 10
+    assert captured["max_retries"] == LLM_CHECK_MAX_RETRIES
+    assert captured["http_timeout"] == 10
+
+
+def test_check_llm_connection_reports_cloudflare_521_concisely(monkeypatch):
+    class FailingCompletions:
+        def create(self, **kwargs):
+            response = httpx.Response(
+                521,
+                request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+            )
+            raise openai.APIStatusError("origin down", response=response, body={})
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FailingCompletions())
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.llm.check_llm.openai.OpenAI",
+        lambda *args, **kwargs: client,
+    )
+
+    ok, message = check_llm_connection("https://example.com/v1", "sk-fake", "model")
+
+    assert ok is False
+    assert message == "HTTP 521: LLM 服务源站不可用，请稍后重试或更换接口。"
 
 
 def test_extract_response_content_raises_on_unsupported():

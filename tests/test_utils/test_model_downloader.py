@@ -59,6 +59,19 @@ def test_download_writes_file_and_reports_progress(tmp_path, monkeypatch):
     assert progress[-1][0] > 0
 
 
+def test_download_replaces_existing_file(tmp_path, monkeypatch):
+    target = tmp_path / "model.bin"
+    target.write_bytes(b"old")
+    _patch_get(
+        monkeypatch,
+        {"https://example.com/model.bin": _FakeResponse([b"new"], total=3)},
+    )
+
+    ModelDownloader(tmp_path).download("https://example.com/model.bin")
+
+    assert target.read_bytes() == b"new"
+
+
 def test_download_hf_mirror_fallback(tmp_path, monkeypatch):
     """A failing huggingface.co URL retries against hf-mirror.com and succeeds."""
     payload = b"model-bytes"

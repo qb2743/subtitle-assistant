@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from PyQt5.QtCore import QEventLoop, QTimer
 
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import (
     SubtitleConfig,
     SubtitleTask,
@@ -20,7 +21,33 @@ from videocaptioner.core.entities import (
 )
 from videocaptioner.core.llm.check_llm import get_available_models
 from videocaptioner.core.translate.types import TargetLanguage
-from videocaptioner.ui.thread.subtitle_thread import SubtitleThread
+from videocaptioner.ui.thread.subtitle_thread import (
+    SubtitleThread,
+    split_long_translations,
+)
+
+
+def test_long_translation_is_split_with_proportional_timestamps():
+    data = ASRData(
+        [
+            ASRDataSeg(
+                "所以规律吃饭选择清淡食物少油少酒控制体重",
+                1000,
+                5000,
+                translated_text=(
+                    "So eating regularly choosing lighter foods cutting back on oil "
+                    "and alcohol and managing your weight"
+                ),
+            )
+        ]
+    )
+
+    result = split_long_translations(data, max_cjk=20, max_words=8)
+
+    assert len(result.segments) == 2
+    assert [segment.start_time for segment in result.segments] == [1000, 3000]
+    assert result.segments[-1].end_time == 5000
+    assert all(len(segment.translated_text.split()) <= 8 for segment in result.segments)
 
 # Load environment variables
 

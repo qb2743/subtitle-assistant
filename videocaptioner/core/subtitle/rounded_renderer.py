@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from videocaptioner.core.entities import SubtitleLayoutEnum
 from videocaptioner.core.utils.logger import setup_logger
@@ -36,14 +36,15 @@ def _get_video_info(video_path: str) -> Tuple[int, int, float]:
 
     # 解析分辨率
     width, height = 0, 0
-    if match := re.search(r"Stream.*Video:.* (\d{2,5})x(\d{2,5})", result.stderr):
+    info = result.stderr or ""
+    if match := re.search(r"Stream.*Video:.* (\d{2,5})x(\d{2,5})", info):
         width, height = int(match.group(1)), int(match.group(2))
     else:
         raise ValueError(f"Cannot get video resolution: {video_path}")
 
     # 解析时长
     duration = 0.0
-    if match := re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr):
+    if match := re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", info):
         h, m, s = match.groups()
         duration = int(h) * 3600 + int(m) * 60 + float(s)
 
@@ -225,10 +226,19 @@ def render_preview(
 
     # 加载或创建背景
     if bg_image_path and Path(bg_image_path).exists():
-        background = Image.open(bg_image_path).convert("RGB")
+        with Image.open(bg_image_path) as source:
+            background = source.convert("RGB")
         # 如果未提供尺寸，从图片获取
         if width is None or height is None:
             width, height = background.size
+        elif background.size != (width, height):
+            fitted = ImageOps.contain(background, (width, height))
+            canvas = Image.new("RGB", (width, height), (0, 0, 0))
+            canvas.paste(
+                fitted,
+                ((width - fitted.width) // 2, (height - fitted.height) // 2),
+            )
+            background = canvas
     else:
         # 没有背景图片，使用默认尺寸或提供的尺寸
         if width is None:

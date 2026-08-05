@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
+from .font_utils import get_font_ass_attributes
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,7 +77,14 @@ class SubtitleStyle:
         """Render as ASS V4+ Styles section (for FFmpeg)."""
         primary = _hex_to_ass(self.primary_color)
         outline = _hex_to_ass(self.outline_color)
-        bold_flag = -1 if self.bold else 0
+        primary_font, primary_variant_bold, primary_italic = get_font_ass_attributes(
+            self.font_name
+        )
+        primary_bold = (
+            primary_variant_bold
+            if "/" in self.font_name
+            else (-1 if self.bold else 0)
+        )
 
         sec = self.secondary or SecondaryStyle(
             font_name=self.font_name,
@@ -83,6 +92,11 @@ class SubtitleStyle:
         )
         sec_color = _hex_to_ass(sec.color)
         sec_outline = _hex_to_ass(sec.outline_color)
+        secondary_font, secondary_bold, secondary_italic = get_font_ass_attributes(
+            sec.font_name
+        )
+        if "/" not in sec.font_name:
+            secondary_bold = primary_bold
 
         header = (
             "[V4+ Styles]\n"
@@ -92,15 +106,15 @@ class SubtitleStyle:
             "Alignment,MarginL,MarginR,MarginV,Encoding"
         )
         default_line = (
-            f"Style: Default,{self.font_name},{self.font_size},"
+            f"Style: Default,{primary_font},{self.font_size},"
             f"{primary},&H000000FF,{outline},&H00000000,"
-            f"{bold_flag},0,0,0,100,100,{self.spacing},0,1,"
+            f"{primary_bold},{primary_italic},0,0,100,100,{self.spacing},0,1,"
             f"{self.outline_width},0,2,10,10,{self.margin_bottom},1,\\q1"
         )
         secondary_line = (
-            f"Style: Secondary,{sec.font_name},{sec.font_size},"
+            f"Style: Secondary,{secondary_font},{sec.font_size},"
             f"{sec_color},&H000000FF,{sec_outline},&H00000000,"
-            f"{bold_flag},0,0,0,100,100,{sec.spacing},0,1,"
+            f"{secondary_bold},{secondary_italic},0,0,100,100,{sec.spacing},0,1,"
             f"{sec.outline_width},0,2,10,10,{self.margin_bottom},1,\\q1"
         )
         return f"{header}\n{default_line}\n{secondary_line}"

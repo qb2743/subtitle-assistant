@@ -79,10 +79,11 @@ class DubbingThread(QThread):
     def _on_pipeline_progress(self, progress: int, message: str = ""):
         """配音管线进度回调"""
         if self._cancelled:
-            return
+            raise RuntimeError("任务已取消")
         self.progress.emit(progress, message or "")
 
     def cancel(self):
         """取消配音任务"""
         logger.info("请求取消配音任务")
         self._cancelled = True
+        self.requestInterruption()

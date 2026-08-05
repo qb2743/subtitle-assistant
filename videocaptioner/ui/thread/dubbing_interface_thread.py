@@ -15,17 +15,19 @@ from videocaptioner.ui.task_factory import TaskFactory
 logger = setup_logger("dubbing_interface_thread")
 
 
-def default_text_dubbing_output_path(response_format: str = "mp3") -> str:
+def default_text_dubbing_output_path(
+    response_format: str = "mp3", output_dir: str | None = None
+) -> str:
     """文案配音默认输出路径：用户可写目录（避免 Program Files / 安装目录无写权限）。
 
     - 打包版：``~/字幕助手/dubbing/``
     - 开发版：项目下 ``work-dir/dubbing/``
     """
     ext = response_format if response_format in ("mp3", "wav", "opus", "aac", "flac") else "mp3"
-    output_dir = WORK_PATH / "dubbing"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = Path(output_dir) if output_dir else WORK_PATH / "dubbing"
+    target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return str(output_dir / f"dubbing_{timestamp}.{ext}")
+    return str(target_dir / f"dubbing_{timestamp}.{ext}")
 
 
 
@@ -47,6 +49,7 @@ class DubbingInterfaceThread(QThread):
         input_data: str,
         output_path: str = None,
         video_path: str = None,
+        config_override=None,
     ):
         """初始化配音线程
 
@@ -61,6 +64,7 @@ class DubbingInterfaceThread(QThread):
         self.input_data = input_data
         self.output_path = output_path
         self.video_path = video_path
+        self.config_override = config_override
         self._cancelled = False
 
     def run(self):
@@ -69,7 +73,7 @@ class DubbingInterfaceThread(QThread):
             logger.info(f"开始配音任务，模式: {self.input_mode}")
 
             # 获取配音配置
-            config = TaskFactory.create_dubbing_config()
+            config = self.config_override or TaskFactory.create_dubbing_config()
 
             if self.input_mode == "subtitle":
                 self._run_subtitle_mode(config)
@@ -111,6 +115,10 @@ class DubbingInterfaceThread(QThread):
             self.output_path = default_dubbed_audio_path(
                 subtitle_path, config.response_format
             )
+            if config.output_dir:
+                self.output_path = str(
+                    Path(config.output_dir) / Path(self.output_path).name
+                )
 
         output = pipeline.run(
             subtitle_path=subtitle_path,
@@ -162,7 +170,8 @@ class DubbingInterfaceThread(QThread):
             if not self.output_path:
                 # 不用 Path.cwd()：打包后 cwd 常是 Program Files，无写权限
                 self.output_path = default_text_dubbing_output_path(
-                    getattr(config, "response_format", None) or "mp3"
+                    getattr(config, "response_format", None) or "mp3",
+                    getattr(config, "output_dir", None) or None,
                 )
                 logger.info(f"自动生成输出路径: {self.output_path}")
 
@@ -200,7 +209,7 @@ class DubbingInterfaceThread(QThread):
     def _on_pipeline_progress(self, progress: int, message: str):
         """配音管线进度回调"""
         if self._cancelled:
-            return
+            raise RuntimeError("任务已取消")
 
         self.progress.emit(progress, message)
 
@@ -208,3 +217,4 @@ class DubbingInterfaceThread(QThread):
         """取消任务"""
         logger.info("请求取消配音任务")
         self._cancelled = True
+        self.requestInterruption()

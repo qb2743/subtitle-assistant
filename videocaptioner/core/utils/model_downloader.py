@@ -14,7 +14,6 @@ the downloader is usable out of the box:
   mirror ids); downloaded via ``download_modelscope_repo``.
 """
 
-import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -90,7 +89,7 @@ class ModelDownloader:
     ``.7z`` (via the ``7z`` binary).
     """
 
-    CHUNK_SIZE = 8192
+    CHUNK_SIZE = 1024 * 1024
 
     def __init__(self, target_dir: str | Path):
         self.target_dir = Path(target_dir)
@@ -162,7 +161,7 @@ class ModelDownloader:
                         cb(downloaded / total * 100, f"已下载: {_format_size(downloaded)} / {_format_size(total)}")
                     else:
                         cb(-1, f"已下载: {_format_size(downloaded)}")
-            shutil.move(str(temp), str(save_path))
+            temp.replace(save_path)
         finally:
             if temp.exists():
                 temp.unlink(missing_ok=True)

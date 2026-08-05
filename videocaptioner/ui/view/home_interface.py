@@ -10,6 +10,7 @@ from videocaptioner.ui.view.subtitle_interface import SubtitleInterface
 from videocaptioner.ui.view.task_creation_interface import TaskCreationInterface
 from videocaptioner.ui.view.text_matching_interface import TextMatchingInterface
 from videocaptioner.ui.view.transcription_interface import TranscriptionInterface
+from videocaptioner.ui.view.video_alignment_interface import VideoAlignmentInterface
 
 
 class HomeInterface(QWidget):
@@ -38,6 +39,7 @@ class HomeInterface(QWidget):
         self.task_creation_interface = TaskCreationInterface(self)
         self.transcription_interface = TranscriptionInterface(self)
         self.subtitle_optimization_interface = SubtitleInterface(self)
+        self.video_alignment_interface = VideoAlignmentInterface(self)
         self.dubbing_interface = DubbingInterface(self)
         self.text_matching_interface = TextMatchingInterface(self)
 
@@ -54,6 +56,11 @@ class HomeInterface(QWidget):
         )
         self.addSubInterface(
             self.dubbing_interface, "DubbingInterface", self.tr("配音")
+        )
+        self.addSubInterface(
+            self.video_alignment_interface,
+            "VideoAlignmentInterface",
+            self.tr("视频对齐"),
         )
         self.addSubInterface(
             self.text_matching_interface, "TextMatchingInterface", self.tr("文稿匹配")
@@ -96,14 +103,12 @@ class HomeInterface(QWidget):
 
     def switch_to_video_synthesis(self, video_path, subtitle_path):
         # 继续使用同一个 task_id，流程结束后清空
-        synthesis_task = TaskFactory.create_synthesis_task(
-            video_path, subtitle_path, need_next_task=True, task_id=self._current_task_id
-        )
         self._current_task_id = None  # 流程结束
-        self.video_synthesis_interface.set_task(synthesis_task)
-        self.video_synthesis_interface.process()
-        self.stackedWidget.setCurrentWidget(self.video_synthesis_interface)
-        self.pivot.setCurrentItem("VideoSynthesisInterface")
+        # 旧版流程曾经使用独立的视频合成页；当前流程统一由视频对齐页处理。
+        if video_path:
+            self.video_alignment_interface.video_input.set_file(video_path)
+        self.stackedWidget.setCurrentWidget(self.video_alignment_interface)
+        self.pivot.setCurrentItem("VideoAlignmentInterface")
 
     def addSubInterface(self, widget, objectName, text):
         # 添加子界面到堆叠控件和分段控件
@@ -126,5 +131,5 @@ class HomeInterface(QWidget):
         self.task_creation_interface.close()
         self.transcription_interface.close()
         self.subtitle_optimization_interface.close()
-        self.video_synthesis_interface.close()
+        self.video_alignment_interface.close()
         super().closeEvent(event)

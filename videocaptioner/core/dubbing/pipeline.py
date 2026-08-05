@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Literal, Optional
 
 from videocaptioner.core.speech import (
@@ -16,6 +16,11 @@ from videocaptioner.core.speech import (
 )
 from videocaptioner.core.speech.api_keys import parse_api_keys
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.video_filters import (
+    apply_video_filter,
+    build_video_filter_chain,
+    detect_scene_cuts_ffmpeg,
+)
 
 from .audio import (
     change_tempo,
@@ -23,6 +28,7 @@ from .audio import (
     create_timeline_audio,
     get_audio_duration_ms,
     mux_dubbed_audio,
+    trim_trailing_silence,
 )
 from .background_mix import mix_background
 from .models import (
@@ -43,6 +49,22 @@ from .video_rate import (
 )
 
 logger = setup_logger("dubbing")
+
+
+def _infer_diarization_language(segments: list[DubbingSegment]) -> str:
+    """Choose a Chinese, English, or multilingual embedding from subtitle text."""
+    cjk = latin = other = 0
+    for segment in segments:
+        for char in segment.text:
+            if "\u4e00" <= char <= "\u9fff":
+                cjk += 1
+            elif char.isascii() and char.isalpha():
+                latin += 1
+            elif char.isalpha():
+                other += 1
+    if other:
+        return "multi"
+    return "en" if latin > cjk else "zh"
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -71,9 +93,25 @@ def resolve_tts_worker_count(config: DubbingConfig, segment_count: int) -> int:
 
 def default_dubbed_audio_path(subtitle_path: str, response_format: str = "mp3") -> str:
     """与字幕同目录、同主文件名，扩展名为最终音频格式。"""
-    stem = Path(subtitle_path).stem
     ext = response_format if response_format in ("mp3", "wav", "opus", "aac", "flac") else "mp3"
+    # Keep POSIX-style paths stable even when called on Windows (CLI/tests often
+    # receive slash-separated paths from manifests); native Windows paths still
+    # use pathlib's normal handling.
+    if "/" in subtitle_path and "\\" not in subtitle_path and not (
+        len(subtitle_path) >= 2 and subtitle_path[1] == ":"
+    ):
+        source = PurePosixPath(subtitle_path)
+        return str(source.with_name(f"{source.stem}.{ext}"))
+    stem = Path(subtitle_path).stem
     return str(Path(subtitle_path).with_name(f"{stem}.{ext}"))
+
+
+def _ms_to_srt_ts(ms: int) -> str:
+    """Convert milliseconds to an SRT timestamp (HH:MM:SS,mmm)."""
+    total_seconds, milliseconds = divmod(max(0, int(ms)), 1000)
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02},{int(milliseconds):03}"
 
 
 class DubbingPipeline:
@@ -111,7 +149,18 @@ class DubbingPipeline:
         callback: Optional[ProgressCallback] = None,
     ) -> DubbingResult:
         cb = callback or (lambda _progress, _message: None)
-        out_audio = Path(output_audio_path)
+        # When configured, output_dir owns both generated artifacts while the
+        # caller-provided names are retained.  An explicit empty value keeps
+        # the historical behavior exactly unchanged.
+        output_dir = str(getattr(self.config, "output_dir", "") or "").strip()
+        if output_dir:
+            target_dir = Path(output_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            out_audio = target_dir / Path(output_audio_path).name
+            if output_video_path:
+                output_video_path = str(target_dir / Path(output_video_path).name)
+        else:
+            out_audio = Path(output_audio_path)
         work = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix=".dubbing_work_"))
         work.mkdir(parents=True, exist_ok=True)
 
@@ -143,10 +192,16 @@ class DubbingPipeline:
         segments = load_dubbing_segments(subtitle_path, text_track=text_track)
         if not segments:
             raise ValueError("No subtitle lines found for dubbing")
-        self._apply_speakers(segments)
 
         warnings: list[str] = []
         instrument_path: Optional[str] = None
+
+        # ---- 阶段3 前置:说话人识别 + 解说员过滤 + LLM 复核恢复 ----
+        segments = self._apply_diarization_and_narrator_filter(
+            segments, video_path, out_audio, work, cb, warnings
+        )
+
+        self._apply_speakers(segments)
         if self.config.separate_vocal:
             if not video_path:
                 warnings.append("separate_vocal 需要视频输入,已跳过人声分离")
@@ -244,6 +299,7 @@ class DubbingPipeline:
                 )
             )
             video_plan = plan
+
         elif self.config.subtitle_gap_ms > 0:
             # 语音间隔模式:每条配音后插入静音,保留原时间轴整体顺延。
             placements = compute_timeline_placements(
@@ -310,12 +366,46 @@ class DubbingPipeline:
         if video_path:
             if not output_video_path:
                 base = Path(video_path)
-                output_video_path = str(base.with_stem(base.stem + "_dubbed"))
+                output_dir = str(getattr(self.config, "output_dir", "") or "").strip()
+                if output_dir:
+                    output_video_path = str(Path(output_dir) / f"{base.stem}_dubbed{base.suffix}")
+                else:
+                    output_video_path = str(base.with_stem(base.stem + "_dubbed"))
             mux_source = video_path
+            # Apply visual effects on the stable source timeline. Scene-cut
+            # timestamps then land on real source frames instead of rounded
+            # timestamps from the independently encoded rate clips.
+            random_mirror = bool(getattr(self.config, "random_mirror", False))
+            random_color = bool(getattr(self.config, "random_color", False))
+            canvas = getattr(self.config, "canvas", None)
+            if random_mirror or random_color or canvas:
+                cb(90, "applying video filters")
+                try:
+                    filter_chain = build_video_filter_chain(
+                        canvas=canvas,
+                        scene_cuts=(
+                            detect_scene_cuts_ffmpeg(str(video_path))
+                            if random_mirror
+                            else None
+                        ),
+                        video_duration=get_video_duration_ms(str(video_path)) / 1000,
+                        random_mirror=random_mirror,
+                        random_color=random_color,
+                    )
+                    if filter_chain:
+                        filtered_source = work / "filtered_source.mp4"
+                        apply_video_filter(
+                            str(video_path), str(filtered_source), filter_chain
+                        )
+                        mux_source = str(filtered_source)
+                except Exception as exc:
+                    warnings.append(f"画面滤镜失败,已跳过: {exc}")
+                    logger.warning("画面滤镜失败,已跳过: %s", exc)
+
             if self.config.video_autorate and video_plan is not None:
                 cb(90, "adjusting video rate")
                 rate_video = str(work / "rate.mp4")
-                apply_video_rate(video_path, video_plan, rate_video, callback=cb)
+                apply_video_rate(mux_source, video_plan, rate_video, callback=cb)
                 mux_source = rate_video
             cb(94, "muxing video")
             mux_dubbed_audio(
@@ -329,12 +419,14 @@ class DubbingPipeline:
             out_video = Path(output_video_path)
 
             if self.config.embed_subtitle == "hard":
-                from videocaptioner.core.utils.video_utils import add_subtitles
-
                 cb(96, "burning subtitles")
                 subtitle_source = adjusted_subtitle_path or Path(subtitle_path)
                 baked = work / "baked.mp4"
-                add_subtitles(str(out_video), str(subtitle_source), str(baked))
+                self._burn_subtitles(
+                    str(out_video),
+                    str(subtitle_source),
+                    str(baked),
+                )
                 # 跨盘符安全:replace 会抛 OSError,改用 shutil.move。
                 shutil.move(str(baked), str(out_video))
 
@@ -346,6 +438,50 @@ class DubbingPipeline:
             duration_ms=duration_ms,
             warnings=warnings,
             adjusted_subtitle_path=adjusted_subtitle_path,
+        )
+
+    def _burn_subtitles(self, video_path: str, subtitle_path: str, output_path: str) -> None:
+        """Burn subtitles, using the configured style when one is available."""
+        from videocaptioner.core.utils.video_utils import add_subtitles, add_subtitles_with_style
+
+        mode = getattr(self.config, "subtitle_render_mode", None)
+        ass_style = str(getattr(self.config, "subtitle_ass_style", "") or "")
+        rounded_style = getattr(self.config, "subtitle_rounded_style", None)
+        # No style explicitly configured: preserve the lightweight legacy path.
+        if not ass_style and not rounded_style:
+            add_subtitles(video_path, subtitle_path, output_path)
+            return
+
+        from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+        from videocaptioner.core.entities import SubtitleLayoutEnum, SubtitleRenderModeEnum
+
+        segments = load_dubbing_segments(subtitle_path)
+        asr = ASRData(
+            [ASRDataSeg(seg.text, seg.start_ms, seg.end_ms) for seg in segments]
+        )
+        if isinstance(mode, SubtitleRenderModeEnum):
+            render_mode = mode
+        else:
+            mode_text = str(mode or "").lower()
+            render_mode = (
+                SubtitleRenderModeEnum.ROUNDED_BG
+                if mode_text in {"rounded", "rounded_bg", "圆角背景"}
+                else SubtitleRenderModeEnum.ASS_STYLE
+            )
+        layout = getattr(self.config, "subtitle_layout", SubtitleLayoutEnum.ONLY_ORIGINAL)
+        if not isinstance(layout, SubtitleLayoutEnum):
+            layout = next(
+                (item for item in SubtitleLayoutEnum if str(layout) in {item.value, item.name}),
+                SubtitleLayoutEnum.ONLY_ORIGINAL,
+            )
+        add_subtitles_with_style(
+            video_path,
+            asr,
+            output_path,
+            render_mode,
+            layout,
+            ass_style=ass_style,
+            rounded_style=rounded_style,
         )
 
     @staticmethod
@@ -372,6 +508,156 @@ class DubbingPipeline:
             str(out_path),
         ]
         subprocess.run(cmd, check=True, **_SUBPROCESS_KWARGS)
+
+    def _apply_diarization_and_narrator_filter(
+        self,
+        segments: list[DubbingSegment],
+        video_path: Optional[str],
+        out_audio: Path,
+        work: Path,
+        cb: ProgressCallback,
+        warnings: list[str],
+    ) -> list[DubbingSegment]:
+        """阶段3 前置:说话人识别 → 分配 → (可选)解说员过滤 → (可选)LLM 复核恢复。
+
+        - ``enable_diarization`` 且提供 ``video_path``:运行 sherpa-onnx 说话人分离,
+          经 ``assign_speakers`` 得到与字幕平行的 ``"spk0"/""`` 数组,并写 sidecar
+          ``<输出音频同名>.speaker.json``(输出音频同目录)。
+        - ``narrator_only`` 且有说话人数组:解说员过滤;被删字幕写
+          ``<输出音频同名>.narrator_dropped.srt``;``narrator_llm_review`` 时用 LLM
+          复核误删并恢复。
+        - 无 ``video_path`` 时 warning 并跳过(与 ``separate_vocal`` 一致)。
+        - 过滤后无剩余字幕 → 抛出明确中文错误。
+
+        Args:
+            segments: 已加载的配音字幕段。
+            video_path: 可选的视频路径(说话人识别需要)。
+            out_audio: 最终配音输出路径(用于派生 sidecar 文件名)。
+            work: 工作目录。
+            cb: 进度回调。
+            warnings: 追加警告的列表。
+
+        Returns:
+            处理后的字幕段(可能已被解说员过滤/LLM 恢复)。
+        """
+        if not self.config.enable_diarization:
+            return segments
+
+        if not video_path:
+            warnings.append("enable_diarization 需要视频输入,已跳过说话人识别")
+            logger.warning("enable_diarization requires video_path; skipping speaker diarization")
+            return segments
+
+        speaker_labels: Optional[list[str]] = None
+        try:
+            from videocaptioner.core.diarization import diarize
+            from videocaptioner.core.diarization.assign import assign_speakers, write_speaker_json
+
+            cb(3, "identifying speakers")
+            # 分离器内部 0-100 进度映射到流水线 3-4 区间,保持 UI 进度单调。
+            language = str(getattr(self.config, "diarization_language", "auto") or "auto").lower()
+            if language not in {"zh", "en", "multi"}:
+                language = _infer_diarization_language(segments)
+            diarizations = diarize(
+                str(video_path),
+                num_speakers=self.config.speaker_count,
+                language=language,
+                progress=lambda p, s: cb(3 + int(p) * 1 // 100, s),
+                isolate_process=True,
+            )
+            speaker_labels = assign_speakers(segments, diarizations)
+            write_speaker_json(
+                speaker_labels,
+                str(out_audio.with_name(out_audio.stem + ".speaker.json")),
+            )
+            logger.info(
+                "说话人识别完成,共 %d 个说话人标签",
+                len(set(spk for spk in speaker_labels if spk)),
+            )
+        except Exception as exc:
+            speaker_labels = None
+            warnings.append(f"说话人识别失败,已跳过: {exc}")
+            logger.warning("说话人识别失败,已跳过: %s", exc)
+
+        if self.config.narrator_only and speaker_labels is not None:
+            cb(3, "filtering narrator")
+            try:
+                from videocaptioner.core.dubbing.narrator_filter import (
+                    filter_narrator_subtitles,
+                )
+
+                kept_indices, report = filter_narrator_subtitles(segments, speaker_labels)
+                kept_set = set(kept_indices)
+                dropped_indices = [i for i in range(len(segments)) if i not in kept_set]
+
+                # 被删字幕写 SRT 到输出目录,便于人工复核。
+                self._write_dropped_subtitles(
+                    segments,
+                    dropped_indices,
+                    str(out_audio.with_name(out_audio.stem + ".narrator_dropped.srt")),
+                )
+                if dropped_indices:
+                    warnings.append(f"解说员过滤删除 {len(dropped_indices)} 条字幕")
+
+                if (
+                    self.config.narrator_llm_review
+                    and (report.get("need_review") or dropped_indices)
+                ):
+                    try:
+                        from videocaptioner.core.dubbing.narrator_llm_judge import (
+                            judge_dropped,
+                        )
+
+                        kept_segments = [segments[i] for i in kept_indices]
+                        dropped_segments = [segments[i] for i in dropped_indices]
+                        llm_fields = (
+                            self.config.llm_api_key,
+                            self.config.llm_api_base,
+                            self.config.llm_model,
+                        )
+                        restore_dropped = judge_dropped(
+                            kept_segments,
+                            dropped_segments,
+                            llm_fields,
+                            # Keep the optional review inside the early
+                            # diarization progress window; judge_dropped emits
+                            # 0/100 relative progress by design.
+                            progress=lambda p, s: cb(3 + int(p) // 100, s),
+                        )
+                        restore_orig = [dropped_indices[i] for i in restore_dropped]
+                        if restore_orig:
+                            warnings.append(f"LLM 复核恢复 {len(restore_orig)} 条字幕")
+                            kept_indices = sorted(kept_set | set(restore_orig))
+                            logger.info("LLM 复核恢复字幕下标: %s", restore_orig)
+                    except Exception as exc:
+                        warnings.append(f"LLM 复核失败,已跳过: {exc}")
+                        logger.warning("LLM 复核失败,已跳过: %s", exc)
+
+                segments = [segments[i] for i in sorted(kept_indices)]
+                if not segments:
+                    raise ValueError("解说员过滤后无剩余字幕,请调整识别参数或关闭仅保留解说员")
+            except ValueError:
+                raise
+            except Exception as exc:
+                warnings.append(f"解说员过滤失败,已跳过: {exc}")
+                logger.warning("解说员过滤失败,已跳过: %s", exc)
+
+        return segments
+
+    @staticmethod
+    def _write_dropped_subtitles(
+        segments: list[DubbingSegment], dropped_indices: list[int], path: str
+    ) -> None:
+        """把被删字幕写成 SRT(保留原始 index 编号)。"""
+        lines: list[str] = []
+        for i in dropped_indices:
+            seg = segments[i]
+            lines.append(f"{seg.index}")
+            lines.append(f"{_ms_to_srt_ts(seg.start_ms)} --> {_ms_to_srt_ts(seg.end_ms)}")
+            lines.append(seg.text)
+            lines.append("")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
 
     def _apply_speakers(self, segments: list[DubbingSegment]) -> None:
         default_profile = self.config.speaker_profiles.get("default")
@@ -444,15 +730,20 @@ class DubbingPipeline:
 
     def _process_segment(self, segment: DubbingSegment, work: Path) -> DubbingSegment:
         raw_path = work / f"{segment.index:04d}_{self._segment_hash(segment)}_raw.{self._provider_extension()}"
+        trimmed_path = work / f"{segment.index:04d}_{self._segment_hash(segment)}_trim.wav"
         reusable_raw = self.config.use_cache and self._valid_audio_path(raw_path)
         if reusable_raw:
-            segment.synthesized_path = str(raw_path)
+            segment.synthesized_path = trim_trailing_silence(
+                str(raw_path), str(trimmed_path)
+            )
             segment.synthesized_duration_ms = get_audio_duration_ms(segment.synthesized_path)
             if self._needs_duration_retry(segment, segment.synthesized_duration_ms):
                 raw_path.unlink(missing_ok=True)
                 reusable_raw = False
         if not reusable_raw:
-            segment.synthesized_path = self._synthesize_with_duration_retry(segment, raw_path)
+            segment.synthesized_path = self._synthesize_with_duration_retry(
+                segment, raw_path, trimmed_path
+            )
         segment.synthesized_duration_ms = get_audio_duration_ms(segment.synthesized_path)
         segment.fitted_path = self._fit_segment(segment, work)
         segment.fitted_duration_ms = get_audio_duration_ms(segment.fitted_path)
@@ -476,7 +767,9 @@ class DubbingPipeline:
         segment.warning = "合成失败，已用静音占位"
         return segment
 
-    def _synthesize_with_duration_retry(self, segment: DubbingSegment, raw_path: Path) -> str:
+    def _synthesize_with_duration_retry(
+        self, segment: DubbingSegment, raw_path: Path, trimmed_path: Path
+    ) -> str:
         last_path = ""
         original_style = segment.style_prompt
         for attempt in range(3):
@@ -496,7 +789,7 @@ class DubbingPipeline:
                     clone_audio_text=segment.clone_audio_text,
                 )
             )
-            last_path = result.output_path
+            last_path = trim_trailing_silence(result.output_path, str(trimmed_path))
             duration_ms = get_audio_duration_ms(last_path)
             if not self._needs_duration_retry(segment, duration_ms):
                 return last_path

@@ -4,7 +4,7 @@ from typing import List
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from videocaptioner.core.asr.asr_data import ASRData
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import (
     SubtitleConfig,
     SubtitleLayoutEnum,
@@ -25,6 +25,7 @@ from videocaptioner.core.split.split import SubtitleSplitter
 from videocaptioner.core.translate.factory import TranslatorFactory
 from videocaptioner.core.translate.types import TranslatorType
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
 SERVICE_TO_TYPE = {
     TranslatorServiceEnum.OPENAI: TranslatorType.OPENAI,
@@ -63,6 +64,51 @@ def create_translator_from_config(
     )
 
 
+def split_long_translations(
+    asr_data: ASRData, max_cjk: int, max_words: int
+) -> ASRData:
+    """Split translated rows that grew beyond the selected target-language limit."""
+
+    def units(text: str) -> tuple[list[str], str]:
+        if is_mainly_cjk(text):
+            return [char for char in text.strip() if not char.isspace()], ""
+        return text.split(), " "
+
+    result: list[ASRDataSeg] = []
+    for segment in asr_data.segments:
+        translated_units, separator = units(segment.translated_text)
+        limit = max_cjk if separator == "" else max_words
+        if not segment.translated_text or len(translated_units) <= limit:
+            result.append(segment)
+            continue
+
+        translated_chunks = [
+            translated_units[index : index + limit]
+            for index in range(0, len(translated_units), limit)
+        ]
+        original_units, original_separator = units(segment.text)
+        count = len(translated_chunks)
+        duration = max(1, segment.end_time - segment.start_time)
+        for index, chunk in enumerate(translated_chunks):
+            original_start = round(index * len(original_units) / count)
+            original_end = round((index + 1) * len(original_units) / count)
+            start = segment.start_time + round(index * duration / count)
+            end = (
+                segment.end_time
+                if index == count - 1
+                else segment.start_time + round((index + 1) * duration / count)
+            )
+            result.append(
+                ASRDataSeg(
+                    original_separator.join(original_units[original_start:original_end]),
+                    start,
+                    end,
+                    translated_text=separator.join(chunk),
+                )
+            )
+    return ASRData(result)
+
+
 class SubtitleThread(QThread):
     finished = pyqtSignal(str, str)
     progress = pyqtSignal(int, str)
@@ -77,6 +123,9 @@ class SubtitleThread(QThread):
         self.finished_subtitle_length = 0
         self.custom_prompt_text = ""
         self.optimizer = None
+        self.splitter = None
+        self.translator = None
+        self._cancelled = False
 
     def set_custom_prompt_text(self, text: str):
         self.custom_prompt_text = text
@@ -112,6 +161,7 @@ class SubtitleThread(QThread):
         )
 
         try:
+            self._raise_if_cancelled()
             logger.info(f"\n{self.task.subtitle_config.print_config()}")
 
             # 字幕文件路径检查、对断句字幕路径进行定义
@@ -130,7 +180,9 @@ class SubtitleThread(QThread):
 
             # 验证 LLM 配置
             if self.need_llm(subtitle_config, asr_data):
-                self.progress.emit(2, self.tr("开始验证 LLM 配置..."))
+                self.progress.emit(
+                    2, self.tr("开始验证 LLM 配置（限流或网络错误会自动重试）...")
+                )
                 subtitle_config = self._setup_llm_config()
 
             # 2. 重新断句（对于字词级字幕）
@@ -138,13 +190,14 @@ class SubtitleThread(QThread):
                 update_stage("split")
                 self.progress.emit(5, self.tr("字幕断句..."))
                 logger.info("正在字幕断句...")
-                splitter = SubtitleSplitter(
+                self.splitter = SubtitleSplitter(
                     thread_num=subtitle_config.thread_num,
                     model=subtitle_config.llm_model,
                     max_word_count_cjk=subtitle_config.max_word_count_cjk,
                     max_word_count_english=subtitle_config.max_word_count_english,
                 )
-                asr_data = splitter.split_subtitle(asr_data)
+                asr_data = self.splitter.split_subtitle(asr_data)
+                self._raise_if_cancelled()
                 self.update_all.emit(asr_data.to_json())
 
             # 3. 优化字幕
@@ -159,14 +212,15 @@ class SubtitleThread(QThread):
                 self.finished_subtitle_length = 0
                 if not subtitle_config.llm_model:
                     raise Exception(self.tr("LLM 模型未配置"))
-                optimizer = SubtitleOptimizer(
+                self.optimizer = SubtitleOptimizer(
                     thread_num=subtitle_config.thread_num,
                     batch_num=subtitle_config.batch_size,
                     model=subtitle_config.llm_model,
                     custom_prompt=custom_prompt or "",
                     update_callback=self.callback,
                 )
-                asr_data = optimizer.optimize_subtitle(asr_data)
+                asr_data = self.optimizer.optimize_subtitle(asr_data)
+                self._raise_if_cancelled()
                 asr_data.remove_punctuation()
                 self.update_all.emit(asr_data.to_json())
 
@@ -180,11 +234,19 @@ class SubtitleThread(QThread):
                 if not subtitle_config.target_language:
                     raise Exception(self.tr("目标语言未配置"))
 
-                translator = create_translator_from_config(
+                self.translator = create_translator_from_config(
                     subtitle_config, custom_prompt, self.callback
                 )
 
-                asr_data = translator.translate_subtitle(asr_data)
+                asr_data = self.translator.translate_subtitle(asr_data)
+                self._raise_if_cancelled()
+
+                if subtitle_config.need_split:
+                    asr_data = split_long_translations(
+                        asr_data,
+                        subtitle_config.max_word_count_cjk,
+                        subtitle_config.max_word_count_english,
+                    )
 
                 # 移除末尾标点符号
                 asr_data.remove_punctuation()
@@ -236,6 +298,8 @@ class SubtitleThread(QThread):
             self.finished.emit(self.task.video_path, self.task.output_path)
 
         except Exception as e:
+            if self._cancelled:
+                return
             logger.exception(f"字幕处理失败: {str(e)}")
             self.error.emit(str(e))
             self.progress.emit(100, self.tr("字幕处理失败"))
@@ -258,6 +322,7 @@ class SubtitleThread(QThread):
         )
 
     def callback(self, result: List[SubtitleProcessData]):
+        self._raise_if_cancelled()
         self.finished_subtitle_length += len(result)
         # 简单计算当前进度（0-100%）
         progress = min(int((self.finished_subtitle_length / max(self.subtitle_length, 1)) * 100), 100)
@@ -268,6 +333,19 @@ class SubtitleThread(QThread):
             for data in result
         }
         self.update.emit(result_dict)
+
+    def cancel(self):
+        """协作式取消，供批处理清空列表使用。"""
+        self._cancelled = True
+        self.requestInterruption()
+        for worker in (self.splitter, self.optimizer, self.translator):
+            stopper = getattr(worker, "stop", None)
+            if callable(stopper):
+                stopper()
+
+    def _raise_if_cancelled(self):
+        if self._cancelled or self.isInterruptionRequested():
+            raise RuntimeError("任务已取消")
 
     def stop(self):
         """停止所有处理"""

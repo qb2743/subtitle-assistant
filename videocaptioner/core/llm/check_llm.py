@@ -15,6 +15,8 @@ from videocaptioner.core.llm.response_utils import (
 # 向后兼容别名（测试和外部代码可能引用旧名称）
 _parse_sse_string = parse_sse_string
 
+LLM_CHECK_MAX_RETRIES = 3
+
 
 def _extract_response_content(response) -> str:
     """从响应中提取内容，失败时抛 ValueError（兼容旧调用方）。"""
@@ -49,25 +51,32 @@ def check_llm_connection(
         response = openai.OpenAI(
             base_url=base_url,
             api_key=api_key,
-            timeout=60,
-            http_client=create_http_client(),
+            timeout=10,
+            max_retries=LLM_CHECK_MAX_RETRIES,
+            http_client=create_http_client(timeout=10),
         ).chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": 'Just respond with "Hello"!'},
             ],
-            timeout=30,
+            timeout=10,
         )
         return True, _extract_response_content(response)
     except openai.APIConnectionError:
         return False, "API Connection Error. Please check your network or VPN."
     except openai.RateLimitError as e:
-        return False, "Rate Limit Error: " + str(e)
+        return False, (
+            f"Rate Limit Error（已自动重试 {LLM_CHECK_MAX_RETRIES} 次）: {e}"
+        )
     except openai.AuthenticationError:
         return False, "Authentication Error. Please check your API key."
     except openai.NotFoundError:
         return False, "URL Not Found Error. Please check your Base URL."
+    except openai.APIStatusError as e:
+        if e.status_code == 521:
+            return False, "HTTP 521: LLM 服务源站不可用，请稍后重试或更换接口。"
+        return False, f"HTTP {e.status_code}: {e.message}"
     except openai.OpenAIError as e:
         return False, "OpenAI Error: " + str(e)
     except Exception as e:

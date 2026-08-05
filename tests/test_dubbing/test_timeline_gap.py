@@ -1,7 +1,5 @@
 """Tests for the subtitle_gap_ms timeline placement pure functions."""
 
-import pytest
-
 from videocaptioner.core.dubbing.models import DubbingSegment
 from videocaptioner.core.dubbing.timeline import (
     compute_timeline_placements,

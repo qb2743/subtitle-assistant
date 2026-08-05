@@ -1,4 +1,4 @@
-"""视频翻译全流程线程: 转录 -> 说话人筛选 -> 翻译 -> 配音与画面对齐。"""
+"""视频字幕全流程线程: 转录 -> 说话人筛选 -> 翻译/洗稿 -> 配音与画面对齐。"""
 
 from __future__ import annotations
 
@@ -26,9 +26,12 @@ logger = setup_logger("video_translation_thread")
 REVIEW_WAIT_TIMEOUT_SECONDS = 40
 
 
-def _job_output_dir(video: Path, configured_root: str) -> Path:
+def _job_output_dir(
+    video: Path, configured_root: str, subtitle_action: str = "translate"
+) -> Path:
     root = Path(configured_root.strip()) if configured_root.strip() else video.parent
-    return root / f"{video.stem}_视频翻译"
+    action = "洗稿" if subtitle_action == "rewrite" else "翻译"
+    return root / f"{video.stem}_视频{action}"
 
 
 def _organize_outputs(output_dir: Path, video: Path, translated_path: Path) -> Path:
@@ -98,7 +101,7 @@ def _save_narrator_review_artifacts(
 
 
 class VideoTranslationThread(QThread):
-    """可暂停人工复核的单视频翻译线程。
+    """可暂停人工复核的单视频字幕处理线程。
 
     ``manual_review`` 仅控制被删除说话人字幕是否暂停等待 UI；
     ``translation_review`` 独立控制翻译表格复核。
@@ -117,11 +120,20 @@ class VideoTranslationThread(QThread):
         *,
         manual_review: bool = False,
         translation_review: bool = True,
+        subtitle_action: str | None = None,
     ):
         super().__init__()
         self.video_path = str(video_path)
         self.manual_review = manual_review
         self.translation_review = translation_review
+        action = subtitle_action or str(cfg.subtitle_action.value or "translate")
+        self.subtitle_action = action if action in {"translate", "rewrite"} else "translate"
+        snapshot_task = TaskFactory.create_subtitle_task(
+            self.video_path, self.video_path, need_next_task=False
+        )
+        self.subtitle_config = snapshot_task.subtitle_config
+        if self.subtitle_config:
+            self.subtitle_config.subtitle_action = self.subtitle_action
         self._cancelled = False
         self._narrator_event = threading.Event()
         self._translation_event = threading.Event()
@@ -132,7 +144,7 @@ class VideoTranslationThread(QThread):
         try:
             self._run_workflow()
         except Exception as exc:  # noqa: BLE001
-            logger.exception("视频翻译流程失败: %s", exc)
+            logger.exception("视频字幕处理流程失败: %s", exc)
             if not self._cancelled:
                 self.error.emit(str(exc))
 
@@ -140,7 +152,11 @@ class VideoTranslationThread(QThread):
         video = Path(self.video_path)
         if not video.is_file():
             raise ValueError("视频文件不存在")
-        output_dir = _job_output_dir(video, str(cfg.dubbing_output_dir.value or ""))
+        output_dir = _job_output_dir(
+            video,
+            str(cfg.dubbing_output_dir.value or ""),
+            self.subtitle_action,
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         intermediate_dir = output_dir / "中间文件"
         intermediate_dir.mkdir(parents=True, exist_ok=True)
@@ -168,13 +184,19 @@ class VideoTranslationThread(QThread):
         if self._cancelled:
             return
 
-        self.progress.emit(25, "开始字幕翻译...")
+        is_rewrite = self.subtitle_action == "rewrite"
+        action_label = "洗稿" if is_rewrite else "翻译"
+        self.progress.emit(25, f"开始字幕{action_label}...")
         subtitle_task = TaskFactory.create_subtitle_task(
             str(source_subtitle), self.video_path, need_next_task=False
         )
         subtitle_task.output_path = str(
-            source_subtitle.with_name(source_subtitle.stem + "-translated.srt")
+            source_subtitle.with_name(
+                source_subtitle.stem
+                + ("-rewritten.srt" if is_rewrite else "-translated.srt")
+            )
         )
+        subtitle_task.subtitle_config = self.subtitle_config
         # 翻译表复核阶段保留双语字幕供表格对照；批量模式直接输出仅译文。
         if subtitle_task.subtitle_config:
             subtitle_task.subtitle_config.subtitle_layout = (
@@ -183,7 +205,7 @@ class VideoTranslationThread(QThread):
                 else SubtitleLayoutEnum.ONLY_TRANSLATE
             )
         subtitle_result = self._run_child(
-            SubtitleThread(subtitle_task), 25, 35, "字幕翻译"
+            SubtitleThread(subtitle_task), 25, 35, f"字幕{action_label}"
         )
         translated_path = Path(subtitle_result[1] if isinstance(subtitle_result, tuple) else subtitle_task.output_path)
         if not translated_path.exists():
@@ -191,13 +213,13 @@ class VideoTranslationThread(QThread):
 
         if self.translation_review:
             self.translation_ready.emit(str(translated_path))
-            self._wait_for_review(self._translation_event, "翻译字幕")
+            self._wait_for_review(self._translation_event, f"{action_label}字幕")
             if self._cancelled:
                 return
 
         self.progress.emit(60, "开始字幕配音与画面对齐...")
         config = TaskFactory.create_dubbing_config()
-        # 视频翻译必须按字幕时间轴对齐；配音面板的固定停顿模式会跳过视频变速。
+        # 视频字幕处理必须按字幕时间轴对齐；配音面板的固定停顿模式会跳过视频变速。
         config.fixed_line_pause = False
         # 画面变速模式保留 TTS 自然语速，不再先做一轮音频加速。
         if config.video_autorate:
@@ -216,7 +238,7 @@ class VideoTranslationThread(QThread):
         output = self._run_child(dub_thread, 60, 40, "配音与画面对齐")
         output_path = output[0] if isinstance(output, tuple) else output
         _organize_outputs(output_dir, video, translated_path)
-        self.progress.emit(100, "视频翻译完成")
+        self.progress.emit(100, f"视频{action_label}完成")
         self.finished.emit(str(output_path))
 
     def _run_child(self, child, offset: int, scale: int, stage: str):

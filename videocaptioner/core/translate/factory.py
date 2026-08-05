@@ -28,6 +28,7 @@ class TranslatorFactory:
         is_reflect: bool = False,
         update_callback: Optional[Callable] = None,
         translation_mode: str = "auto",
+        subtitle_action: str = "translate",
     ) -> BaseTranslator:
         """创建翻译器实例"""
         try:
@@ -46,6 +47,7 @@ class TranslatorFactory:
                     is_reflect=is_reflect,
                     update_callback=update_callback,
                     translation_mode=translation_mode,
+                    subtitle_action=subtitle_action,
                 )
             elif translator_type == TranslatorType.GOOGLE:
                 batch_num = 5

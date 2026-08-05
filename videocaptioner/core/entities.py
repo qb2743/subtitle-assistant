@@ -640,6 +640,8 @@ class SubtitleConfig:
     batch_size: int = 10
     # 翻译模式：auto / full_context / chunked
     translation_mode: str = "auto"
+    # 字幕处理动作：translate / rewrite
+    subtitle_action: str = "translate"
     # 字幕布局和分割
     subtitle_layout: SubtitleLayoutEnum = SubtitleLayoutEnum.ORIGINAL_ON_TOP
     max_word_count_cjk: int = 12
@@ -648,6 +650,7 @@ class SubtitleConfig:
     target_language: Optional["TargetLanguage"] = None
     subtitle_style: Optional[str] = None
     translation_prompt_text: Optional[str] = None
+    rewrite_prompt_text: Optional[str] = None
     custom_prompt_text: Optional[str] = None
 
     def _mask_key(self, key: Optional[str]) -> str:
@@ -672,11 +675,15 @@ class SubtitleConfig:
                 lines.append(f"  Custom Prompt: {self.custom_prompt_text[:30]}...")
 
         if self.need_translate:
-            lines.append("Translate: Yes")
+            lines.append(
+                "Rewrite: Yes" if self.subtitle_action == "rewrite" else "Translate: Yes"
+            )
             lines.append(
                 f"  Service: {self.translator_service.value if self.translator_service else 'None'}"
             )
-            if self.translation_prompt_text:
+            if self.subtitle_action == "rewrite" and self.rewrite_prompt_text:
+                lines.append(f"  Rewrite Prompt: {self.rewrite_prompt_text[:30]}...")
+            elif self.translation_prompt_text:
                 lines.append(f"  Translation Prompt: {self.translation_prompt_text[:30]}...")
             if self.translator_service == TranslatorServiceEnum.OPENAI:
                 lines.append(f"  API Base: {self.base_url}")

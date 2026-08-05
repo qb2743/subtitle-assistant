@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -49,6 +50,7 @@ from videocaptioner.core.entities import (
     SubtitleLayoutEnum,
     SubtitleTask,
     SupportedSubtitleFormats,
+    TranslatorServiceEnum,
 )
 from videocaptioner.core.prompts import get_prompt
 from videocaptioner.core.subtitle import get_subtitle_style
@@ -147,7 +149,11 @@ class SubtitleTableModel(QAbstractTableModel):
                     self.tr("结束时间"),
                     self.tr("字幕内容"),
                     (
-                        self.tr("翻译字幕")
+                        (
+                            self.tr("洗稿字幕")
+                            if cfg.subtitle_action.value == "rewrite"
+                            else self.tr("翻译字幕")
+                        )
                         if cfg.need_translate.value
                         else self.tr("优化字幕")
                     ),
@@ -205,6 +211,7 @@ class SubtitleInterface(QWidget):
         self.task: Optional[SubtitleTask] = None
         self.subtitle_path: Optional[str] = None
         self.translation_prompt_text: str = cfg.translation_prompt_text.value
+        self.rewrite_prompt_text: str = cfg.rewrite_prompt_text.value
         self.custom_prompt_text: str = cfg.custom_prompt_text.value
         self.setAttribute(Qt.WA_DeleteOnClose)  # type: ignore
         self._init_ui()
@@ -226,9 +233,18 @@ class SubtitleInterface(QWidget):
             cfg.subtitle_layout.value.value
         )  # Get enum's string value
         self.translate_button.setChecked(cfg.need_translate.value)
+        action = cfg.subtitle_action.value
+        self.subtitle_action_button.setText(
+            self._subtitle_action_labels.get(action, self.tr("翻译"))
+        )
+        self.translate_button.setText(
+            self.tr("字幕洗稿") if action == "rewrite" else self.tr("字幕翻译")
+        )
         self.optimize_button.setChecked(cfg.need_optimize.value)
         self.target_language_button.setText(cfg.target_language.value.value)
-        self.target_language_button.setEnabled(cfg.need_translate.value)
+        self.target_language_button.setEnabled(
+            cfg.need_translate.value and action == "translate"
+        )
         # 同步翻译模式按钮
         current_mode = cfg.translation_mode.value
         self.translation_mode_button.setText(
@@ -299,6 +315,25 @@ class SubtitleInterface(QWidget):
             checkable=True,
         )
         self.command_bar.addAction(self.translate_button)
+
+        self.subtitle_action_button = TransparentDropDownPushButton(
+            self.tr("翻译"), self, FIF.EDIT
+        )
+        self.subtitle_action_button.setFixedHeight(34)
+        self.subtitle_action_button.setMinimumWidth(100)
+        self.subtitle_action_menu = RoundMenu(parent=self)
+        self._subtitle_action_labels = {
+            "translate": self.tr("翻译"),
+            "rewrite": self.tr("洗稿"),
+        }
+        for action_key, action_label in self._subtitle_action_labels.items():
+            action = Action(text=action_label)
+            action.triggered.connect(
+                lambda checked, key=action_key: self.on_subtitle_action_changed(key)
+            )
+            self.subtitle_action_menu.addAction(action)
+        self.subtitle_action_button.setMenu(self.subtitle_action_menu)
+        self.command_bar.addWidget(self.subtitle_action_button)
 
         # 添加翻译语言选择
         self.target_language_button = TransparentDropDownPushButton(
@@ -446,11 +481,22 @@ class SubtitleInterface(QWidget):
         dialog = PromptDialog(self)
         if dialog.exec_():
             self.translation_prompt_text = cfg.translation_prompt_text.value
+            self.rewrite_prompt_text = cfg.rewrite_prompt_text.value
             self.custom_prompt_text = cfg.custom_prompt_text.value
+            if self.task and self.task.subtitle_config:
+                self.task.subtitle_config.translation_prompt_text = (
+                    self.translation_prompt_text
+                )
+                self.task.subtitle_config.rewrite_prompt_text = self.rewrite_prompt_text
+                self.task.subtitle_config.custom_prompt_text = self.custom_prompt_text
             self._update_prompt_button_style()
 
     def _update_prompt_button_style(self) -> None:
-        if self.custom_prompt_text.strip() or self.translation_prompt_text.strip():
+        if (
+            self.custom_prompt_text.strip()
+            or self.translation_prompt_text.strip()
+            or self.rewrite_prompt_text.strip()
+        ):
             green_icon = FIF.DOCUMENT.colored(
                 QColor(76, 255, 165), QColor(76, 255, 165)
             )
@@ -504,6 +550,8 @@ class SubtitleInterface(QWidget):
             return
         if self.task.subtitle_config:
             self.task.subtitle_config.translation_prompt_text = cfg.translation_prompt_text.value
+            self.task.subtitle_config.rewrite_prompt_text = cfg.rewrite_prompt_text.value
+            self.task.subtitle_config.subtitle_action = cfg.subtitle_action.value
             self.task.subtitle_config.custom_prompt_text = self.custom_prompt_text
         self.subtitle_optimization_thread = SubtitleThread(self.task)
         self.subtitle_optimization_thread.finished.connect(
@@ -522,8 +570,8 @@ class SubtitleInterface(QWidget):
         )
         self.subtitle_optimization_thread.start()
         InfoBar.info(
-            self.tr("开始优化"),
-            self.tr("开始优化字幕"),
+            self.tr("开始处理"),
+            self.tr("开始处理字幕"),
             duration=INFOBAR_DURATION_INFO,
             parent=self,
         )
@@ -542,8 +590,8 @@ class SubtitleInterface(QWidget):
         if self.task and self.task.need_next_task:
             self.finished.emit(video_path, output_path)
         InfoBar.success(
-            self.tr("优化完成"),
-            self.tr("优化完成字幕..."),
+            self.tr("处理完成"),
+            self.tr("字幕处理完成"),
             duration=INFOBAR_DURATION_SUCCESS,
             position=InfoBarPosition.BOTTOM,
             parent=self.parent(),
@@ -784,7 +832,12 @@ class SubtitleInterface(QWidget):
         # 添加菜单项
         merge_action = Action(FIF.LINK, self.tr("合并"))
         delete_action = Action(FIF.DELETE, self.tr("删除"))
-        retranslate_action = Action(FIF.SYNC, self.tr("重新翻译"))
+        retranslate_action = Action(
+            FIF.SYNC,
+            self.tr("重新洗稿")
+            if cfg.subtitle_action.value == "rewrite"
+            else self.tr("重新翻译"),
+        )
         menu.addAction(merge_action)
         menu.addAction(delete_action)
         menu.addAction(retranslate_action)
@@ -903,16 +956,20 @@ class SubtitleInterface(QWidget):
         all_keys = list(self.model._data.keys())
         selected_data = {all_keys[row]: self.model._data[all_keys[row]] for row in rows}
 
-        # 获取当前翻译配置
-        subtitle_task = TaskFactory.create_subtitle_task(
-            file_path=self.subtitle_path or ""
-        )
-        config = subtitle_task.subtitle_config
+        # 使用当前任务配置，避免后台流程期间混入后来修改的全局设置。
+        config = self.task.subtitle_config if self.task else None
+        if config is None:
+            config = TaskFactory.create_subtitle_task(
+                file_path=self.subtitle_path or ""
+            ).subtitle_config
         if not config:
             return
+        config = replace(config)
+        self._retranslate_action = config.subtitle_action
 
         self.start_button.setEnabled(False)
-        self.status_label.setText(self.tr("正在重新翻译..."))
+        action = self.tr("洗稿") if config.subtitle_action == "rewrite" else self.tr("翻译")
+        self.status_label.setText(self.tr("正在重新{0}...").format(action))
         self.progress_bar.resume()
         self.progress_bar.reset()
 
@@ -927,10 +984,11 @@ class SubtitleInterface(QWidget):
         self.start_button.setEnabled(True)
         self.model.update_data(result)
         self.progress_bar.setValue(100)
-        self.status_label.setText(self.tr("重新翻译完成"))
+        action = self.tr("洗稿") if self._retranslate_action == "rewrite" else self.tr("翻译")
+        self.status_label.setText(self.tr("重新{0}完成").format(action))
         InfoBar.success(
-            self.tr("翻译完成"),
-            self.tr("已更新选中行的翻译"),
+            self.tr("{0}完成").format(action),
+            self.tr("已更新选中行的{0}结果").format(action),
             duration=INFOBAR_DURATION_SUCCESS,
             parent=self,
         )
@@ -938,9 +996,10 @@ class SubtitleInterface(QWidget):
     def _on_retranslate_error(self, error: str) -> None:
         self.start_button.setEnabled(True)
         self.progress_bar.error()
-        self.status_label.setText(self.tr("重新翻译失败"))
+        action = self.tr("洗稿") if self._retranslate_action == "rewrite" else self.tr("翻译")
+        self.status_label.setText(self.tr("重新{0}失败").format(action))
         InfoBar.error(
-            self.tr("翻译失败"),
+            self.tr("{0}失败").format(action),
             error,
             duration=INFOBAR_DURATION_ERROR,
             parent=self,
@@ -993,6 +1052,8 @@ class SubtitleInterface(QWidget):
             if lang.value == language:
                 self.target_language_button.setText(lang.value)
                 cfg.set(cfg.target_language, lang)
+                if self.task and self.task.subtitle_config:
+                    self.task.subtitle_config.target_language = lang
                 break
 
     def on_subtitle_optimization_changed(self, checked: bool) -> None:
@@ -1003,9 +1064,34 @@ class SubtitleInterface(QWidget):
     def on_subtitle_translation_changed(self, checked: bool) -> None:
         """处理字幕翻译开关变更"""
         cfg.set(cfg.need_translate, checked)
+        if self.task and self.task.subtitle_config:
+            self.task.subtitle_config.need_translate = checked
         self.translate_button.setChecked(checked)
         # 控制翻译语言选择按钮的启用状态
-        self.target_language_button.setEnabled(checked)
+        self.target_language_button.setEnabled(
+            checked and cfg.subtitle_action.value == "translate"
+        )
+
+    def on_subtitle_action_changed(self, action: str) -> None:
+        if action not in self._subtitle_action_labels:
+            return
+        if action == "rewrite":
+            cfg.set(cfg.translator_service, TranslatorServiceEnum.OPENAI)
+        cfg.set(cfg.subtitle_action, action)
+        if self.task and self.task.subtitle_config:
+            self.task.subtitle_config.subtitle_action = action
+            if action == "rewrite":
+                self.task.subtitle_config.translator_service = (
+                    TranslatorServiceEnum.OPENAI
+                )
+        self.subtitle_action_button.setText(self._subtitle_action_labels[action])
+        self.translate_button.setText(
+            self.tr("字幕洗稿") if action == "rewrite" else self.tr("字幕翻译")
+        )
+        self.target_language_button.setEnabled(
+            cfg.need_translate.value and action == "translate"
+        )
+        self.model.headerDataChanged.emit(Qt.Horizontal, 3, 3)
 
     def on_subtitle_layout_changed(self, layout: str) -> None:
         """处理字幕排布变更"""
@@ -1030,6 +1116,7 @@ class PromptDialog(MessageBoxBase):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.default_translation_prompt = self._default_translation_prompt()
+        self.default_rewrite_prompt = get_prompt("rewrite/standard")
         self.setup_ui()
         self.setWindowTitle(self.tr("Prompt"))
         # 连接按钮点击事件
@@ -1052,6 +1139,20 @@ class PromptDialog(MessageBoxBase):
         )
         self.translation_prompt_edit.setMinimumWidth(640)
         self.translation_prompt_edit.setMinimumHeight(420)
+
+        self.rewrite_prompt_label = BodyLabel(self.tr("洗稿系统提示词模板"), self)
+        self.rewrite_prompt_edit = TextEdit(self)
+        self.rewrite_prompt_edit.setPlaceholderText(
+            self.tr(
+                "用于 LLM 字幕洗稿的系统提示词。\n"
+                "保持原语言和下方文稿提示会在运行时自动注入；变量 ${custom_prompt} 可保留，也可以删除。"
+            )
+        )
+        self.rewrite_prompt_edit.setText(
+            cfg.rewrite_prompt_text.value or self.default_rewrite_prompt
+        )
+        self.rewrite_prompt_edit.setMinimumWidth(640)
+        self.rewrite_prompt_edit.setMinimumHeight(420)
 
         self.custom_prompt_label = BodyLabel(self.tr("文稿提示 / 术语表"), self)
 
@@ -1084,16 +1185,25 @@ class PromptDialog(MessageBoxBase):
         translation_tab = self._build_prompt_tab(
             self.translation_prompt_label, self.translation_prompt_edit
         )
+        rewrite_tab = self._build_prompt_tab(
+            self.rewrite_prompt_label, self.rewrite_prompt_edit
+        )
         custom_tab = self._build_prompt_tab(
             self.custom_prompt_label, self.custom_prompt_edit
         )
         self.prompt_stack.addWidget(translation_tab)
+        self.prompt_stack.addWidget(rewrite_tab)
         self.prompt_stack.addWidget(custom_tab)
 
         self.prompt_pivot.addItem(
             routeKey="translationPrompt",
             text=self.tr("翻译系统提示词"),
             onClick=lambda: self.prompt_stack.setCurrentWidget(translation_tab),
+        )
+        self.prompt_pivot.addItem(
+            routeKey="rewritePrompt",
+            text=self.tr("洗稿系统提示词"),
+            onClick=lambda: self.prompt_stack.setCurrentWidget(rewrite_tab),
         )
         self.prompt_pivot.addItem(
             routeKey="customPrompt",
@@ -1130,7 +1240,11 @@ class PromptDialog(MessageBoxBase):
         translation_prompt = self.translation_prompt_edit.toPlainText()
         if translation_prompt.strip() == self.default_translation_prompt.strip():
             translation_prompt = ""
+        rewrite_prompt = self.rewrite_prompt_edit.toPlainText()
+        if rewrite_prompt.strip() == self.default_rewrite_prompt.strip():
+            rewrite_prompt = ""
         cfg.set(cfg.translation_prompt_text, translation_prompt)
+        cfg.set(cfg.rewrite_prompt_text, rewrite_prompt)
         cfg.set(cfg.custom_prompt_text, self.custom_prompt_edit.toPlainText())
 
     @staticmethod

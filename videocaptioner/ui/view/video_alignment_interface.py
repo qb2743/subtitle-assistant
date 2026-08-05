@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""视频翻译全流程面板。"""
+"""视频字幕翻译与洗稿全流程面板。"""
 
 import json
 from hashlib import sha256
@@ -82,7 +82,7 @@ from videocaptioner.ui.thread.video_translation_thread import (
     VideoTranslationThread,
     _job_output_dir,
 )
-from videocaptioner.ui.view.subtitle_interface import SubtitleInterface
+from videocaptioner.ui.view.subtitle_interface import PromptDialog, SubtitleInterface
 
 REVIEW_TIMEOUT_SECONDS = 30
 
@@ -528,7 +528,7 @@ class NarratorReviewDialog(QDialog):
 
 
 class VideoAlignmentInterface(QWidget):
-    """视频转录、翻译、配音、画面对齐的一站式工作流。"""
+    """视频转录、字幕处理、配音、画面对齐的一站式工作流。"""
 
     finished = pyqtSignal(str)
 
@@ -572,7 +572,13 @@ class VideoAlignmentInterface(QWidget):
         workflow = QVBoxLayout(workflow_card)
         workflow.setContentsMargins(12, 10, 12, 10)
         workflow.setSpacing(6)
-        workflow.addWidget(BodyLabel("翻译流程设置", self))
+        workflow_header = QHBoxLayout()
+        workflow_header.addWidget(BodyLabel("字幕处理流程设置", self))
+        workflow_header.addStretch()
+        self.prompt_button = PushButton(FIF.DOCUMENT, "提示词设置", self)
+        self.prompt_button.clicked.connect(self._show_prompt_dialog)
+        workflow_header.addWidget(self.prompt_button)
+        workflow.addLayout(workflow_header)
 
         workflow_columns = QHBoxLayout()
         workflow_columns.setSpacing(18)
@@ -580,10 +586,15 @@ class VideoAlignmentInterface(QWidget):
         workflow_right = QVBoxLayout()
         workflow_left.setSpacing(5)
         workflow_right.setSpacing(5)
+        self.subtitle_action_combo = self._combo_row(
+            workflow_left,
+            "字幕处理方式",
+            [("翻译", "translate"), ("洗稿", "rewrite")],
+        )
         self.transcribe_model_combo = self._enum_combo(workflow_left, "转录渠道 / 模型", TranscribeModelEnum, cfg.transcribe_model.value)
         self.source_language_combo = self._enum_combo(workflow_left, "源语言", TranscribeLanguageEnum, cfg.transcribe_language.value)
-        self.target_language_combo = self._enum_combo(workflow_left, "目标语言", TargetLanguage, cfg.target_language.value)
-        self.translator_combo = self._enum_combo(workflow_right, "字幕翻译渠道", TranslatorServiceEnum, cfg.translator_service.value)
+        self.target_language_combo = self._enum_combo(workflow_left, "目标 / 配音语言", TargetLanguage, cfg.target_language.value)
+        self.translator_combo = self._enum_combo(workflow_right, "字幕处理渠道", TranslatorServiceEnum, cfg.translator_service.value)
         self.tts_provider_combo = ComboBox(self)
         self.tts_provider_combo.addItems([
             "edge - Edge TTS (免费)", "elevenlabs - ElevenLabs", "gemini - Gemini",
@@ -699,7 +710,7 @@ class VideoAlignmentInterface(QWidget):
         self._add_widget_row(options_right, "额外背景音频", self.extra_bgm_edit, browse=True, clear=True)
         self.output_dir_edit = LineEdit(self)
         self.output_dir_edit.setReadOnly(True)
-        self.output_dir_edit.setPlaceholderText("留空：在源视频旁创建“视频名_视频翻译”文件夹")
+        self.output_dir_edit.setPlaceholderText("留空：在源视频旁创建独立任务文件夹")
         self.output_dir_edit.setText(cfg.dubbing_output_dir.value or "")
         self._add_widget_row(options_right, "输出目录", self.output_dir_edit, directory=True, clear=True)
         options_columns.addLayout(options_left, 1)
@@ -707,7 +718,7 @@ class VideoAlignmentInterface(QWidget):
         options.addLayout(options_columns)
         layout.addWidget(self.options_card)
 
-        self.editor_title = BodyLabel("字幕翻译表格（转录完成后可编辑）", self)
+        self.editor_title = BodyLabel("字幕处理表格（转录完成后可编辑）", self)
         self.editor_title.setVisible(False)
         layout.addWidget(self.editor_title)
         self.subtitle_editor = SubtitleInterface(self)
@@ -740,6 +751,9 @@ class VideoAlignmentInterface(QWidget):
         root.addWidget(self.scroll_area)
 
         self.video_input.fileSelected.connect(self._on_video_selected)
+        self.subtitle_action_combo.currentIndexChanged.connect(
+            self._on_subtitle_action_changed
+        )
         self.tts_provider_combo.currentIndexChanged.connect(self._on_tts_provider_changed)
         self.target_language_combo.currentIndexChanged.connect(self._refresh_tts_voices)
         for widget in (
@@ -872,6 +886,7 @@ class VideoAlignmentInterface(QWidget):
 
     def _on_video_selected(self, path: str):
         self.start_btn.setEnabled(True)
+        self._update_subtitle_action_ui()
         self._last_narrator_review_path = ""
         self._refresh_narrator_review_button()
         self._preview_frame_threads = [
@@ -925,6 +940,33 @@ class VideoAlignmentInterface(QWidget):
         self.canvas_combo.setCurrentIndex(index if index >= 0 else 0)
         index = self.embed_combo.findData(cfg.dubbing_embed_subtitle.value or "none")
         self.embed_combo.setCurrentIndex(index if index >= 0 else 0)
+        index = self.subtitle_action_combo.findData(cfg.subtitle_action.value or "translate")
+        self.subtitle_action_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._update_subtitle_action_ui()
+
+    def _show_prompt_dialog(self):
+        PromptDialog(self).exec_()
+
+    def _is_rewrite(self) -> bool:
+        return self.subtitle_action_combo.currentData() == "rewrite"
+
+    def _update_subtitle_action_ui(self):
+        is_rewrite = self._is_rewrite()
+        if is_rewrite:
+            index = self.translator_combo.findData(TranslatorServiceEnum.OPENAI)
+            if index >= 0:
+                self.translator_combo.blockSignals(True)
+                self.translator_combo.setCurrentIndex(index)
+                self.translator_combo.blockSignals(False)
+        self.translator_combo.setEnabled(not is_rewrite)
+        action = "洗稿" if is_rewrite else "翻译"
+        prefix = "" if self.video_input.file_path else "选择视频后"
+        self.start_btn.setText(f"{prefix}开始{action}全流程")
+        self.editor_title.setText(f"字幕{action}表格（转录完成后可编辑）")
+
+    def _on_subtitle_action_changed(self, *_args):
+        self._update_subtitle_action_ui()
+        self._persist()
 
     def _tts_provider_id(self) -> str:
         return self.tts_provider_combo.currentText().split(" - ", 1)[0].strip().lower()
@@ -984,6 +1026,7 @@ class VideoAlignmentInterface(QWidget):
     def _persist(self, *_args):
         if self._config_loading:
             return
+        cfg.subtitle_action.value = self.subtitle_action_combo.currentData() or "translate"
         cfg.transcribe_model.value = self.transcribe_model_combo.currentData()
         cfg.transcribe_language.value = self.source_language_combo.currentData()
         cfg.target_language.value = self.target_language_combo.currentData()
@@ -1039,7 +1082,7 @@ class VideoAlignmentInterface(QWidget):
         self._translation_review_timer.stop()
         self._persist()
         if not self.video_input.file_path:
-            self._warn("请选择视频", "视频翻译流程必须先选择源视频文件")
+            self._warn("请选择视频", "视频字幕处理流程必须先选择源视频文件")
             return
         if (
             self.diarization_switch.isChecked()
@@ -1053,6 +1096,7 @@ class VideoAlignmentInterface(QWidget):
             self._show_diarization_model_manager()
             return
         self.start_btn.setEnabled(False)
+        self.subtitle_action_combo.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setVisible(True)
@@ -1061,6 +1105,7 @@ class VideoAlignmentInterface(QWidget):
             self.video_input.file_path,
             manual_review=False,
             translation_review=True,
+            subtitle_action=self.subtitle_action_combo.currentData(),
         )
         self.workflow_thread.progress.connect(self._on_progress)
         self.workflow_thread.narrator_review_saved.connect(self._on_narrator_review_saved)
@@ -1076,7 +1121,9 @@ class VideoAlignmentInterface(QWidget):
         if not self.video_input.file_path:
             return None
         output = _job_output_dir(
-            Path(self.video_input.file_path), self.output_dir_edit.text()
+            Path(self.video_input.file_path),
+            self.output_dir_edit.text(),
+            self.subtitle_action_combo.currentData(),
         )
         reviews = sorted(
             (output / "中间文件").glob("*-narrator-review.json"),
@@ -1136,6 +1183,8 @@ class VideoAlignmentInterface(QWidget):
         task = TaskFactory.create_subtitle_task(subtitle_path, self.video_input.file_path, need_next_task=True)
         task.subtitle_path = subtitle_path
         task.output_path = subtitle_path
+        if self.workflow_thread and self.workflow_thread.subtitle_config:
+            task.subtitle_config = self.workflow_thread.subtitle_config
         self.subtitle_editor.set_task(task)
         self.editor_title.setVisible(True)
         self.subtitle_editor.setVisible(True)
@@ -1144,7 +1193,8 @@ class VideoAlignmentInterface(QWidget):
         self._translation_review_remaining = REVIEW_TIMEOUT_SECONDS
         self._update_translation_review_text()
         self._translation_review_timer.start(1000)
-        self.status_label.setText("请检查并编辑翻译字幕，倒计时结束后自动继续")
+        action = "洗稿" if self._is_rewrite() else "翻译"
+        self.status_label.setText(f"请检查并编辑{action}字幕，倒计时结束后自动继续")
 
     def _tick_translation_review(self):
         self._translation_review_remaining -= 1
@@ -1195,15 +1245,21 @@ class VideoAlignmentInterface(QWidget):
     def _on_error(self, message):
         self._translation_review_timer.stop()
         self.start_btn.setEnabled(True)
+        self.subtitle_action_combo.setEnabled(True)
+        self._update_subtitle_action_ui()
         self.progress_bar.setVisible(False)
         self.status_label.setText(f"失败: {message}")
-        InfoBar.error(title="视频翻译失败", content=message, duration=INFOBAR_DURATION_ERROR, position=InfoBarPosition.TOP, parent=self)
+        action = "洗稿" if self._is_rewrite() else "翻译"
+        InfoBar.error(title=f"视频{action}失败", content=message, duration=INFOBAR_DURATION_ERROR, position=InfoBarPosition.TOP, parent=self)
 
     def _on_finished(self, output_path):
         self._translation_review_timer.stop()
         self.start_btn.setEnabled(True)
+        self.subtitle_action_combo.setEnabled(True)
+        self._update_subtitle_action_ui()
         self.progress_bar.setValue(100)
-        self.status_label.setText("视频翻译完成")
+        action = "洗稿" if self._is_rewrite() else "翻译"
+        self.status_label.setText(f"视频{action}完成")
         self._last_output_path = output_path
         self.open_folder_btn.setVisible(True)
         self._refresh_narrator_review_button()

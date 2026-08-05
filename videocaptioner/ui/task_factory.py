@@ -123,9 +123,15 @@ class TaskFactory:
         output_name = (
             Path(file_path).stem.replace("【原始字幕】", "").replace("【下载字幕】", "")
         )
-        # 只在需要翻译时添加翻译服务后缀
+        # 只在需要翻译或洗稿时添加处理后缀
         suffix = (
-            f"-{cfg.translator_service.value.value}" if cfg.need_translate.value else ""
+            (
+                "-LLM 大模型洗稿"
+                if cfg.subtitle_action.value == "rewrite"
+                else f"-{cfg.translator_service.value.value}"
+            )
+            if cfg.need_translate.value
+            else ""
         )
 
         if need_next_task:
@@ -193,6 +199,7 @@ class TaskFactory:
             thread_num=cfg.thread_num.value,
             batch_size=cfg.batch_size.value,
             translation_mode=cfg.translation_mode.value,
+            subtitle_action=cfg.subtitle_action.value,
             # 字幕布局、样式
             subtitle_layout=cfg.subtitle_layout.value,  # Now returns SubtitleLayoutEnum
             subtitle_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value),
@@ -204,6 +211,7 @@ class TaskFactory:
             target_language=cfg.target_language.value,
             # 字幕提示
             translation_prompt_text=cfg.translation_prompt_text.value,
+            rewrite_prompt_text=cfg.rewrite_prompt_text.value,
             custom_prompt_text=cfg.custom_prompt_text.value,
         )
 

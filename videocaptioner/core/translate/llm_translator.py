@@ -23,6 +23,9 @@ class LLMTranslator(BaseTranslator):
     MAX_STEPS = 3
     STRUCTURED_TEMPERATURE = 0.1
     ERROR_MARKERS = {"ERROR", "TRANSLATION_ERROR", "FAILED"}
+    # ponytail: multi-row exact-match heuristic; use semantic similarity only if real false positives appear.
+    REWRITE_NOOP_MIN_LENGTH = 8
+    REWRITE_NOOP_MIN_ROWS = 2
     # 字幕条数超过此阈值时跳过 full_context，直接用分块+多线程模式，
     # 让线程数和批处理大小参数生效，避免一次性发送超大 payload。
     FULL_CONTEXT_THRESHOLD = 100
@@ -38,6 +41,7 @@ class LLMTranslator(BaseTranslator):
         update_callback: Optional[Callable],
         translation_prompt: str = "",
         translation_mode: str = "auto",
+        subtitle_action: str = "translate",
     ):
         super().__init__(
             thread_num=thread_num,
@@ -49,8 +53,15 @@ class LLMTranslator(BaseTranslator):
         self.model = model
         self.custom_prompt = custom_prompt
         self.translation_prompt = translation_prompt
-        self.is_reflect = is_reflect
+        self.subtitle_action = (
+            subtitle_action if subtitle_action in {"translate", "rewrite"} else "translate"
+        )
+        self.is_reflect = is_reflect and self.subtitle_action == "translate"
         self.translation_mode = translation_mode
+
+    @property
+    def is_rewrite(self) -> bool:
+        return self.subtitle_action == "rewrite"
 
     def translate_subtitle(self, subtitle_data: ASRData) -> ASRData:
         """Translate a subtitle with full context while preserving local timestamps.
@@ -128,22 +139,35 @@ class LLMTranslator(BaseTranslator):
                 failed += 1
                 failed_indexes.append(data.index)
                 continue
-            # 翻译结果等于原文（非英语目标语言）也视为失败
-            if (
+            normalized_original = self._normalize_for_compare(original)
+            normalized_translated = self._normalize_for_compare(translated)
+            if not self.is_rewrite and (
                 self.target_language
                 not in {
                     TargetLanguage.ENGLISH,
                     TargetLanguage.ENGLISH_US,
                     TargetLanguage.ENGLISH_UK,
                 }
-                and self._normalize_for_compare(original)
-                == self._normalize_for_compare(translated)
+                and normalized_original == normalized_translated
             ):
                 failed += 1
                 failed_indexes.append(data.index)
 
         if total == 0:
             return
+        _, unchanged_rewrite_indexes = self._rewrite_noop_details(translated_list)
+        unchanged_ratio = len(unchanged_rewrite_indexes) / total
+        if (
+            self.is_rewrite
+            and len(unchanged_rewrite_indexes) >= self.REWRITE_NOOP_MIN_ROWS
+            and unchanged_ratio > 0.5
+        ):
+            sample = ", ".join(str(i) for i in unchanged_rewrite_indexes[:10])
+            raise RuntimeError(
+                f"Rewrite returned the original text for "
+                f"{len(unchanged_rewrite_indexes)}/{total} rows "
+                f"({unchanged_ratio:.0%}). Unchanged indexes: {sample}."
+            )
         failure_ratio = failed / total
         if failure_ratio > 0.5:
             sample = ", ".join(str(i) for i in failed_indexes[:10])
@@ -263,6 +287,10 @@ class LLMTranslator(BaseTranslator):
             return self._with_runtime_context(
                 self._render_prompt_template(self.translation_prompt)
             )
+        if self.is_rewrite:
+            return self._with_runtime_context(
+                get_prompt("rewrite/standard", custom_prompt=self.custom_prompt)
+            )
         if self.is_reflect:
             return self._with_runtime_context(
                 get_prompt(
@@ -290,20 +318,34 @@ class LLMTranslator(BaseTranslator):
         return str(getattr(self.target_language, "value", self.target_language))
 
     def _with_runtime_context(self, prompt: str) -> str:
-        target = self._target_language_text()
-        context = (
-            "<runtime_translation_context>\n"
-            f"Target language: {target}\n"
-            "This target language is authoritative even if the editable prompt omits its variable.\n"
-        )
+        if self.is_rewrite:
+            context = (
+                "<runtime_rewrite_context>\n"
+                "Operation: rewrite each subtitle in its original language.\n"
+                "Keeping the source language is authoritative even if the editable prompt requests translation.\n"
+                "Preserve facts, relationships, numbers, names, causality, and emotional direction; never invent content.\n"
+                "Keep each result concise and suitable for the original subtitle timing.\n"
+                "For indexed JSON input, return exactly the same keys without merging, splitting, adding, deleting, or renumbering them.\n"
+                "Editable instructions may change style but cannot override these requirements.\n"
+            )
+            closing_tag = "</runtime_rewrite_context>"
+        else:
+            target = self._target_language_text()
+            context = (
+                "<runtime_translation_context>\n"
+                f"Target language: {target}\n"
+                "This target language is authoritative even if the editable prompt omits its variable.\n"
+            )
+            closing_tag = "</runtime_translation_context>"
         custom_prompt = self.custom_prompt.strip()
         if custom_prompt:
             context += f"User terminology and requirements:\n{custom_prompt}\n"
-        context += "</runtime_translation_context>"
+        context += closing_tag
         return f"{context}\n\n{prompt.strip()}"
 
     def _get_full_context_prompt(self) -> str:
         prompt = self._get_translation_prompt()
+        action = "Rewrite" if self.is_rewrite else "Translate"
         return (
             f"{prompt}\n\n"
             "<full_context_mode>\n"
@@ -311,7 +353,7 @@ class LLMTranslator(BaseTranslator):
             "Keys are immutable subtitle indexes. Values are subtitle text only; timestamps are intentionally omitted.\n"
             "Use the complete JSON as context for consistent terminology, names, pronouns, and style.\n"
             "Return ONLY a valid JSON dictionary with exactly the same keys. Do not add, remove, merge, split, or renumber keys.\n"
-            "If a subtitle is a fragment, translate only that fragment while using surrounding entries for context.\n"
+            f"If a subtitle is a fragment, {action.lower()} only that fragment while using surrounding entries for context.\n"
             "</full_context_mode>"
         )
 
@@ -427,7 +469,17 @@ class LLMTranslator(BaseTranslator):
         self, subtitle_chunk: List[SubtitleProcessData]
     ) -> List[SubtitleProcessData]:
         """Translate rows one by one as a repair path."""
-        single_prompt = self._with_runtime_context(get_prompt("translate/single"))
+        if self.is_rewrite:
+            single_prompt = (
+                f"{self._get_translation_prompt()}\n\n"
+                "<single_item_repair>\n"
+                "The user message is one subtitle text, not JSON. Rewrite only that subtitle.\n"
+                "Return only the final plain text with no JSON, Markdown, quotes, or explanation.\n"
+                "These single-item output rules override JSON output rules above.\n"
+                "</single_item_repair>"
+            )
+        else:
+            single_prompt = self._with_runtime_context(get_prompt("translate/single"))
 
         for data in subtitle_chunk:
             try:
@@ -483,7 +535,7 @@ class LLMTranslator(BaseTranslator):
         if "||ERROR" in translated:
             return True
 
-        if self.target_language not in {
+        if not self.is_rewrite and self.target_language not in {
             TargetLanguage.ENGLISH,
             TargetLanguage.ENGLISH_US,
             TargetLanguage.ENGLISH_UK,
@@ -502,6 +554,37 @@ class LLMTranslator(BaseTranslator):
     def _has_translatable_content(text: str) -> bool:
         return bool(re.search(r"[A-Za-z\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", text))
 
+    def _rewrite_noop_details(
+        self, result: List[SubtitleProcessData]
+    ) -> Tuple[int, List[int]]:
+        if not self.is_rewrite:
+            return 0, []
+        total = 0
+        unchanged = []
+        for data in result:
+            original = (data.original_text or "").strip()
+            if not original or not self._has_translatable_content(original):
+                continue
+            total += 1
+            normalized = self._normalize_for_compare(original)
+            if (
+                len(normalized) >= self.REWRITE_NOOP_MIN_LENGTH
+                and normalized
+                == self._normalize_for_compare((data.translated_text or "").strip())
+            ):
+                unchanged.append(data.index)
+        return total, unchanged
+
+    def _is_cacheable_result(self, result: List[SubtitleProcessData]) -> bool:
+        if not super()._is_cacheable_result(result):
+            return False
+        total, unchanged = self._rewrite_noop_details(result)
+        return not (
+            total
+            and len(unchanged) >= self.REWRITE_NOOP_MIN_ROWS
+            and len(unchanged) / total > 0.5
+        )
+
     def _get_cache_key(self, chunk: List[SubtitleProcessData]) -> str:
         """Generate chunk cache key."""
         class_name = self.__class__.__name__
@@ -509,7 +592,7 @@ class LLMTranslator(BaseTranslator):
         lang = self.target_language.value
         model = self.model
         prompt_hash = self._prompt_hash()
-        return f"{class_name}:chunk:{prompt_hash}:{chunk_key}:{lang}:{model}"
+        return f"{class_name}:chunk:{self.subtitle_action}:{prompt_hash}:{chunk_key}:{lang}:{model}"
 
     def _get_full_context_cache_key(self, chunk: List[SubtitleProcessData]) -> str:
         """Generate full-context cache key."""
@@ -519,8 +602,8 @@ class LLMTranslator(BaseTranslator):
         model = self.model
         prompt_mode = "reflect" if self.is_reflect else "standard"
         prompt_hash = self._prompt_hash()
-        return f"{class_name}:full-context-index-json:{prompt_mode}:{prompt_hash}:{chunk_key}:{lang}:{model}"
+        return f"{class_name}:full-context-index-json:{self.subtitle_action}:{prompt_mode}:{prompt_hash}:{chunk_key}:{lang}:{model}"
 
     def _prompt_hash(self) -> str:
-        raw = f"{self.custom_prompt}\0{self.translation_prompt}"
+        raw = self._get_translation_prompt()
         return hashlib.sha256(raw.encode()).hexdigest()

@@ -149,6 +149,12 @@ class Config(QConfig):
         "auto",
         OptionsValidator(["auto", "full_context", "chunked"]),
     )
+    subtitle_action = OptionsConfigItem(
+        "Translate",
+        "SubtitleAction",
+        "translate",
+        OptionsValidator(["translate", "rewrite"]),
+    )
 
     # ------------------- 转录配置 -------------------
     transcribe_model = OptionsConfigItem(
@@ -248,6 +254,7 @@ class Config(QConfig):
         "Subtitle", "MaxWordCountEnglish", 12, RangeValidator(8, 100)
     )
     translation_prompt_text = ConfigItem("Subtitle", "TranslationPromptText", "")
+    rewrite_prompt_text = ConfigItem("Subtitle", "RewritePromptText", "")
     custom_prompt_text = ConfigItem("Subtitle", "CustomPromptText", "")
 
     # ------------------- 配音配置 -------------------

@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import videocaptioner.ui.thread.video_translation_thread as video_thread_module
 import videocaptioner.ui.view.dubbing_interface as dubbing_module
 import videocaptioner.ui.view.home_interface as home_module
 import videocaptioner.ui.view.video_alignment_interface as alignment_module
@@ -95,6 +96,7 @@ def test_video_alignment_loads_saved_canvas_and_subtitle_mode(monkeypatch):
         dubbing_speaker_count=_item(3),
         dubbing_canvas=_item("1080x1920"),
         dubbing_embed_subtitle=_item("hard"),
+        subtitle_action=_item("rewrite"),
     )
     monkeypatch.setattr(alignment_module, "cfg", fake_cfg)
     interface = SimpleNamespace(
@@ -102,12 +104,15 @@ def test_video_alignment_loads_saved_canvas_and_subtitle_mode(monkeypatch):
         speaker_count_combo=_Combo([("auto", 0), ("3", 3)]),
         canvas_combo=_Combo([("off", "off"), ("portrait", "1080x1920")]),
         embed_combo=_Combo([("none", "none"), ("hard", "hard")]),
+        subtitle_action_combo=_Combo([("翻译", "translate"), ("洗稿", "rewrite")]),
+        _update_subtitle_action_ui=lambda: None,
     )
 
     alignment_module.VideoAlignmentInterface._load_config(interface)
 
     assert interface.canvas_combo.index == 1
     assert interface.embed_combo.index == 1
+    assert interface.subtitle_action_combo.index == 1
 
 
 def test_alignment_voice_options_match_provider_and_target_language():
@@ -353,6 +358,20 @@ def test_video_translation_outputs_to_per_video_folder(tmp_path):
     assert _job_output_dir(video, str(tmp_path / "exports")) == (
         tmp_path / "exports" / "episode_视频翻译"
     )
+
+
+def test_video_translation_freezes_subtitle_config(monkeypatch):
+    config = SimpleNamespace(subtitle_action="translate")
+    monkeypatch.setattr(
+        video_thread_module.TaskFactory,
+        "create_subtitle_task",
+        lambda *args, **kwargs: SimpleNamespace(subtitle_config=config),
+    )
+
+    thread = VideoTranslationThread("episode.mp4", subtitle_action="rewrite")
+
+    assert thread.subtitle_config is config
+    assert config.subtitle_action == "rewrite"
 
 
 def test_video_translation_keeps_only_deliverables_in_output_root(tmp_path):

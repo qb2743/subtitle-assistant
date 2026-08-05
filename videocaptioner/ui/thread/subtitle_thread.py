@@ -44,8 +44,15 @@ def create_translator_from_config(
 ):
     """根据 SubtitleConfig 创建翻译器"""
     translator_service = config.translator_service
+    subtitle_action = (
+        config.subtitle_action
+        if config.subtitle_action in {"translate", "rewrite"}
+        else "translate"
+    )
     if translator_service not in SERVICE_TO_TYPE:
         raise ValueError(f"不支持的翻译服务: {translator_service}")
+    if subtitle_action == "rewrite" and translator_service != TranslatorServiceEnum.OPENAI:
+        raise ValueError("字幕洗稿仅支持 LLM 大模型，请将字幕处理渠道切换为 LLM 大模型")
 
     if translator_service == TranslatorServiceEnum.DEEPLX:
         os.environ["DEEPLX_ENDPOINT"] = config.deeplx_endpoint or ""
@@ -57,10 +64,16 @@ def create_translator_from_config(
         target_language=config.target_language,
         model=config.llm_model or "",
         custom_prompt=custom_prompt,
-        translation_prompt=config.translation_prompt_text or "",
-        is_reflect=config.need_reflect,
+        translation_prompt=(
+            config.rewrite_prompt_text
+            if subtitle_action == "rewrite"
+            else config.translation_prompt_text
+        )
+        or "",
+        is_reflect=config.need_reflect and subtitle_action == "translate",
         update_callback=callback,
         translation_mode=config.translation_mode,
+        subtitle_action=subtitle_action,
     )
 
 
@@ -226,12 +239,14 @@ class SubtitleThread(QThread):
 
             # 4. 翻译字幕
             if subtitle_config.need_translate:
-                update_stage("translate")
-                self.progress.emit(0, self.tr("翻译字幕..."))
-                logger.info("正在翻译字幕...")
+                is_rewrite = subtitle_config.subtitle_action == "rewrite"
+                action_label = self.tr("洗稿") if is_rewrite else self.tr("翻译")
+                update_stage("rewrite" if is_rewrite else "translate")
+                self.progress.emit(0, self.tr("{0}字幕...").format(action_label))
+                logger.info("正在%s字幕...", action_label)
                 self.finished_subtitle_length = 0
 
-                if not subtitle_config.target_language:
+                if not is_rewrite and not subtitle_config.target_language:
                     raise Exception(self.tr("目标语言未配置"))
 
                 self.translator = create_translator_from_config(
@@ -264,7 +279,7 @@ class SubtitleThread(QThread):
                             ass_style=subtitle_config.subtitle_style or "",
                             layout=layout,
                         )
-                        logger.info(f"翻译字幕保存到：{save_path}")
+                        logger.info("%s字幕保存到：%s", action_label, save_path)
 
             # 5. 保存字幕
             asr_data.save(
@@ -394,17 +409,22 @@ class RetranslateThread(QThread):
     def _callback(self, result: List[SubtitleProcessData]):
         self.done += len(result)
         pct = min(int(self.done / self.total * 100), 100)
-        self.progress.emit(pct, self.tr("{0}% 翻译中").format(pct))
+        action = self.tr("洗稿中") if self.subtitle_config.subtitle_action == "rewrite" else self.tr("翻译中")
+        self.progress.emit(pct, self.tr("{0}% {1}").format(pct, action))
 
     def run(self):
         set_task_context(
             task_id=generate_task_id(),
             file_name=self.file_name,
-            stage="translate",
+            stage=(
+                "rewrite"
+                if self.subtitle_config.subtitle_action == "rewrite"
+                else "translate"
+            ),
         )
         try:
             config = self.subtitle_config
-            if not config.target_language:
+            if config.subtitle_action != "rewrite" and not config.target_language:
                 raise Exception("目标语言未配置")
 
             # 设置 LLM 环境变量（LLM 翻译需要）
@@ -418,7 +438,11 @@ class RetranslateThread(QThread):
             asr_data = ASRData.from_json(self.selected_data)
 
             # 创建翻译器并翻译
-            translator = create_translator_from_config(config, callback=self._callback)
+            translator = create_translator_from_config(
+                config,
+                custom_prompt=config.custom_prompt_text or "",
+                callback=self._callback,
+            )
             asr_data = translator.translate_subtitle(asr_data)
 
             # 构建 {原始行号: translated_text} 映射
@@ -430,7 +454,7 @@ class RetranslateThread(QThread):
             self.finished.emit(result)
 
         except Exception as e:
-            logger.exception(f"重新翻译失败: {e}")
+            logger.exception("重新处理字幕失败: %s", e)
             self.error.emit(str(e))
         finally:
             clear_task_context()

@@ -600,16 +600,20 @@ class DubbingInterface(QWidget):
         workers_layout = QHBoxLayout()
         workers_layout.addWidget(BodyLabel("并行数:", self))
         self.workers_slider = Slider(Qt.Horizontal, self)
-        self.workers_slider.setRange(1, 16)
+        self.workers_slider.setRange(1, 50)
         self.workers_slider.setValue(5)
         self.workers_slider.setFixedWidth(180)
         self.workers_slider.setToolTip(
-            "同时合成的字幕条数上限。ElevenLabs 还会受 API Key 数量与模型并发限制。"
+            "同时合成的字幕条数。Fish Audio 按每个配置 Key 计算，Starter/Elevated/"
+            "High Volume 账号请分别设为 5/15/50 路，"
+            "总并发 = Key 数 x 每 Key 并发数；同一 Fish 账号/团队的多个 Key 共享额度，"
+            "只有不同账号的 Key 才能真正扩容，且多账号扩容仅用于基础模型或官方预设；"
+            "账号私有音色与参考音频克隆固定使用第一个 Key。ElevenLabs 也受模型并发限制。"
         )
         self.workers_slider.valueChanged.connect(self._on_workers_slider_changed)
         workers_layout.addWidget(self.workers_slider)
         self.workers_spin = SpinBox(self)
-        self.workers_spin.setRange(1, 16)
+        self.workers_spin.setRange(1, 50)
         self.workers_spin.setValue(5)
         self.workers_spin.setSuffix(" 路")
         self.workers_spin.setFixedWidth(140)

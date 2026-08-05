@@ -4,6 +4,8 @@
 payload, the /model voice-clone upload flow, and provider registration.
 """
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -87,6 +89,276 @@ def test_missing_api_key_raises():
         FishAudioSpeechSynthesizer(_config(api_key=""))
 
 
+def test_multiple_keys_are_parsed_and_deduplicated():
+    synth = FishAudioSpeechSynthesizer(_config(api_key="key-a, key-b; key-a key-c"))
+    assert synth.api_keys == ["key-a", "key-b", "key-c"]
+
+
+def test_paid_tier_concurrency_is_not_clamped_to_starter():
+    synth = FishAudioSpeechSynthesizer(
+        _config(extra={"concurrency_per_key": 15})
+    )
+    assert synth.concurrency_per_key == 15
+
+
+def test_round_robin_rotates_starting_key(tmp_path, _install_fake_post):
+    posts, _ = _install_fake_post
+    synth = FishAudioSpeechSynthesizer(_config(api_key="key-a,key-b,key-c"))
+
+    key_indices = []
+    for index in range(4):
+        result = synth.synthesize(
+            SynthesisRequest(text="hi", output_path=str(tmp_path / f"{index}.wav"))
+        )
+        key_indices.append(result.provider_metadata["api_key_index"])
+
+    assert [post["headers"]["Authorization"] for post in posts] == [
+        "Bearer key-a",
+        "Bearer key-b",
+        "Bearer key-c",
+        "Bearer key-a",
+    ]
+    assert key_indices == [0, 1, 2, 0]
+
+
+def test_private_voice_stays_on_first_key_but_shared_voice_rotates(
+    tmp_path,
+    _install_fake_post,
+):
+    posts, _ = _install_fake_post
+    private_synth = FishAudioSpeechSynthesizer(
+        _config(api_key="key-a,key-b", default_voice="private-voice")
+    )
+    for index in range(2):
+        private_synth.synthesize(
+            SynthesisRequest(
+                text="hi",
+                output_path=str(tmp_path / f"private-{index}.wav"),
+            )
+        )
+
+    shared_synth = FishAudioSpeechSynthesizer(
+        _config(
+            api_key="key-a,key-b",
+            default_voice="public-voice",
+            extra={"shared_voice_ids": ["public-voice"]},
+        )
+    )
+    for index in range(2):
+        shared_synth.synthesize(
+            SynthesisRequest(
+                text="hi",
+                output_path=str(tmp_path / f"public-{index}.wav"),
+            )
+        )
+
+    assert [post["headers"]["Authorization"] for post in posts] == [
+        "Bearer key-a",
+        "Bearer key-a",
+        "Bearer key-a",
+        "Bearer key-b",
+    ]
+
+
+def test_auth_error_switches_to_next_key(tmp_path, _install_fake_post):
+    posts, responses = _install_fake_post
+    responses.extend(
+        [
+            _FakeResponse(status=401),
+            _FakeResponse(content=b"working-key"),
+        ]
+    )
+    synth = FishAudioSpeechSynthesizer(_config(api_key="bad,good"))
+
+    result = synth.synthesize(SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav")))
+
+    assert [post["headers"]["Authorization"] for post in posts] == [
+        "Bearer bad",
+        "Bearer good",
+    ]
+    assert Path(result.output_path).read_bytes() == b"working-key"
+    assert result.provider_metadata["api_key_index"] == 1
+
+
+def test_rate_limit_retries_same_key_with_backoff(
+    tmp_path,
+    _install_fake_post,
+    monkeypatch,
+):
+    posts, responses = _install_fake_post
+    responses.extend(
+        [
+            _FakeResponse(status=429, headers={"Retry-After": "2"}),
+            _FakeResponse(content=b"after-backoff"),
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr(providers_module.time, "sleep", sleeps.append)
+    synth = FishAudioSpeechSynthesizer(_config(api_key="key-a,key-b"))
+
+    result = synth.synthesize(SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav")))
+
+    assert [post["headers"]["Authorization"] for post in posts] == [
+        "Bearer key-a",
+        "Bearer key-a",
+    ]
+    assert sleeps == [2.0]
+    assert Path(result.output_path).read_bytes() == b"after-backoff"
+
+
+@pytest.mark.parametrize("failure", ["server", "network"])
+def test_transient_failure_retries_same_key(
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    posts = []
+
+    def post(url, **kwargs):
+        posts.append({"url": url, **kwargs})
+        if len(posts) == 1:
+            if failure == "server":
+                return _FakeResponse(status=503)
+            raise providers_module.requests.Timeout("timed out")
+        return _FakeResponse(content=b"recovered")
+
+    sleeps = []
+    monkeypatch.setattr(providers_module.requests, "post", post)
+    monkeypatch.setattr(providers_module.time, "sleep", sleeps.append)
+    synth = FishAudioSpeechSynthesizer(_config(api_key="key-a,key-b"))
+
+    result = synth.synthesize(SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav")))
+
+    assert [post["headers"]["Authorization"] for post in posts] == [
+        "Bearer key-a",
+        "Bearer key-a",
+    ]
+    assert sleeps == [1.0]
+    assert Path(result.output_path).read_bytes() == b"recovered"
+
+
+def test_all_keys_fail_with_clear_error(tmp_path, _install_fake_post):
+    posts, responses = _install_fake_post
+    responses.extend([_FakeResponse(status=401), _FakeResponse(status=403)])
+    synth = FishAudioSpeechSynthesizer(_config(api_key="key-a,key-b"))
+
+    with pytest.raises(
+        RuntimeError,
+        match="All 2 Fish Audio API keys failed",
+    ) as exc_info:
+        synth.synthesize(SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav")))
+
+    authorizations = [post["headers"]["Authorization"] for post in posts]
+    assert authorizations == ["Bearer key-a", "Bearer key-b"]
+    assert all("," not in authorization for authorization in authorizations)
+    assert "key-a" not in str(exc_info.value)
+    assert "key-b" not in str(exc_info.value)
+
+
+def test_empty_audio_error_is_not_reported_as_http_200(
+    tmp_path,
+    _install_fake_post,
+):
+    _, responses = _install_fake_post
+    responses.append(_FakeResponse(content=b""))
+    synth = FishAudioSpeechSynthesizer(_config())
+
+    with pytest.raises(RuntimeError, match="empty audio body") as exc_info:
+        synth.synthesize(SynthesisRequest(text="hi", output_path=str(tmp_path / "line.wav")))
+
+    assert "HTTP 200" not in str(exc_info.value)
+
+
+def test_each_key_has_its_own_five_request_concurrency_limit(
+    tmp_path,
+    monkeypatch,
+):
+    lock = threading.Lock()
+    first_wave = threading.Barrier(10)
+    in_flight = {"key-a": 0, "key-b": 0}
+    max_in_flight = {"key-a": 0, "key-b": 0}
+
+    def post(_url, **kwargs):
+        key = kwargs["headers"]["Authorization"].removeprefix("Bearer ")
+        with lock:
+            in_flight[key] += 1
+            max_in_flight[key] = max(max_in_flight[key], in_flight[key])
+        try:
+            try:
+                first_wave.wait(timeout=3)
+            except threading.BrokenBarrierError:
+                pass
+            return _FakeResponse()
+        finally:
+            with lock:
+                in_flight[key] -= 1
+
+    monkeypatch.setattr(providers_module.requests, "post", post)
+    synth = FishAudioSpeechSynthesizer(
+        _config(
+            api_key="key-a,key-b",
+            extra={"concurrency_per_key": 5},
+        )
+    )
+
+    def synthesize(index):
+        return synth.synthesize(
+            SynthesisRequest(
+                text=f"line {index}",
+                output_path=str(tmp_path / f"line-{index}.wav"),
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        results = list(executor.map(synthesize, range(12)))
+
+    assert len(results) == 12
+    assert max_in_flight == {"key-a": 5, "key-b": 5}
+
+
+def test_failed_key_fallback_still_respects_working_key_limit(tmp_path, monkeypatch):
+    lock = threading.Lock()
+    release = threading.Event()
+    good_in_flight = 0
+    good_peak = 0
+
+    def post(_url, **kwargs):
+        nonlocal good_in_flight, good_peak
+        key = kwargs["headers"]["Authorization"].removeprefix("Bearer ")
+        if key == "bad":
+            return _FakeResponse(status=401)
+        with lock:
+            good_in_flight += 1
+            good_peak = max(good_peak, good_in_flight)
+            if good_in_flight == 5:
+                release.set()
+        try:
+            release.wait(timeout=3)
+            return _FakeResponse()
+        finally:
+            with lock:
+                good_in_flight -= 1
+
+    monkeypatch.setattr(providers_module.requests, "post", post)
+    synth = FishAudioSpeechSynthesizer(
+        _config(api_key="bad,good", extra={"concurrency_per_key": 5})
+    )
+
+    def synthesize(index):
+        return synth.synthesize(
+            SynthesisRequest(
+                text=f"line {index}",
+                output_path=str(tmp_path / f"fallback-{index}.wav"),
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        results = list(executor.map(synthesize, range(12)))
+
+    assert len(results) == 12
+    assert good_peak == 5
+
+
 def test_synthesize_posts_correct_payload_and_writes_audio(tmp_path, _install_fake_post):
     posts, _ = _install_fake_post
     synth = FishAudioSpeechSynthesizer(_config(default_voice="abc123", speed=1.5))
@@ -157,6 +429,33 @@ def test_voice_clone_uploads_then_uses_reference_id(tmp_path, _install_fake_post
     assert posts[1]["json"]["reference_id"] == "model_abc"
 
 
+def test_voice_clone_stays_on_first_account_key(tmp_path, _install_fake_post):
+    posts, responses = _install_fake_post
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"ref-audio")
+    responses.extend(
+        [
+            _FakeResponse(json_data={"_id": "model_private"}),
+            _FakeResponse(content=b"cloned"),
+        ]
+    )
+    synth = FishAudioSpeechSynthesizer(_config(api_key="account-a,account-b"))
+
+    synth.synthesize(
+        SynthesisRequest(
+            text="clone me",
+            output_path=str(tmp_path / "out.wav"),
+            clone_audio_path=str(ref),
+            clone_audio_text="reference transcript",
+        )
+    )
+
+    assert [post["headers"]["Authorization"] for post in posts] == [
+        "Bearer account-a",
+        "Bearer account-a",
+    ]
+
+
 def test_voice_clone_caches_reference_id(tmp_path, _install_fake_post):
     posts, responses = _install_fake_post
     ref = tmp_path / "ref.wav"
@@ -179,6 +478,56 @@ def test_voice_clone_caches_reference_id(tmp_path, _install_fake_post):
     tts_posts = [p for p in posts if p["url"].endswith("/v1/tts")]
     assert len(model_posts) == 1
     assert len(tts_posts) == 2
+
+
+def test_voice_clone_cache_is_scoped_to_key_and_api_base(tmp_path):
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"ref-audio")
+    transcript = "reference transcript"
+    first = FishAudioSpeechSynthesizer(_config(api_key="key-a", base_url="https://api.fish.audio"))
+    other_key = FishAudioSpeechSynthesizer(
+        _config(api_key="key-b", base_url="https://api.fish.audio")
+    )
+    other_base = FishAudioSpeechSynthesizer(
+        _config(api_key="key-a", base_url="https://fish.example.test")
+    )
+
+    cache_keys = {
+        first._voice_cache_key(ref, transcript, first.api_keys[0]),
+        other_key._voice_cache_key(ref, transcript, other_key.api_keys[0]),
+        other_base._voice_cache_key(ref, transcript, other_base.api_keys[0]),
+    }
+
+    assert len(cache_keys) == 3
+
+
+def test_concurrent_voice_clone_uploads_reference_once(
+    tmp_path,
+    _install_fake_post,
+):
+    posts, responses = _install_fake_post
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"ref-audio")
+    responses.append(_FakeResponse(json_data={"_id": "model_shared"}))
+    responses.extend(_FakeResponse(content=b"audio") for _ in range(6))
+    synth = FishAudioSpeechSynthesizer(_config(default_voice=""))
+
+    def synthesize(index):
+        return synth.synthesize(
+            SynthesisRequest(
+                text=f"line {index}",
+                output_path=str(tmp_path / f"{index}.wav"),
+                clone_audio_path=str(ref),
+                clone_audio_text="reference transcript",
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(synthesize, range(6)))
+
+    assert len(results) == 6
+    assert len([post for post in posts if post["url"].endswith("/model")]) == 1
+    assert len([post for post in posts if post["url"].endswith("/v1/tts")]) == 6
 
 
 def test_selected_voice_wins_over_leftover_clone_audio(tmp_path, _install_fake_post):

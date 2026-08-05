@@ -268,6 +268,25 @@ def test_resolve_tts_worker_count_elevenlabs_scales_with_keys():
     assert resolve_tts_worker_count(cfg_v2, 10) == 6
 
 
+def test_resolve_tts_worker_count_fishaudio_scales_with_unique_keys():
+    cfg = DubbingConfig(
+        provider="fishaudio",
+        api_key="k1,k2,k3",
+        base_url="",
+        model="s2.1-pro",
+        tts_workers=16,
+    )
+    assert resolve_tts_worker_count(cfg, 100) == 48
+    assert resolve_tts_worker_count(cfg, 20) == 20
+
+    cfg.tts_workers = 2
+    assert resolve_tts_worker_count(cfg, 20) == 6
+
+    cfg.api_key = "k1,k1;k2 k2"
+    cfg.tts_workers = 5
+    assert resolve_tts_worker_count(cfg, 20) == 10
+
+
 def test_dubbing_pipeline_elevenlabs_workers_scale_with_api_keys(tmp_path, monkeypatch):
     lines = []
     for i in range(8):

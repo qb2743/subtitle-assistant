@@ -6,6 +6,13 @@ from typing import Literal, Optional
 SpeechProvider = Literal["siliconflow", "gemini", "edge", "elevenlabs", "dots", "voxcpm", "openai", "fishaudio"]
 AudioFormat = Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]
 
+# Fish Audio defaults to five concurrent requests on Starter accounts. Elevated
+# and High Volume accounts allow 15 and 50; Enterprise is custom. The quota is
+# shared across all keys from one account/team, so key-count multiplication is
+# valid only when the configured keys belong to separate accounts/teams.
+# https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits
+FISHAUDIO_CONCURRENT_PER_ACCOUNT_DEFAULT = 5
+
 
 @dataclass
 class SpeechProviderConfig:

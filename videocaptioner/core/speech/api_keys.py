@@ -19,4 +19,5 @@ def parse_api_keys(key_string: str | None) -> list[str]:
     """
     if not key_string:
         return []
-    return [part.strip() for part in _SPLIT_RE.split(key_string) if part.strip()]
+    keys = [part.strip() for part in _SPLIT_RE.split(key_string) if part.strip()]
+    return list(dict.fromkeys(keys))

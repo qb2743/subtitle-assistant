@@ -1,4 +1,4 @@
-"""Unit tests for the ElevenLabs API key parser."""
+"""Unit tests for the speech-provider API key parser."""
 
 from videocaptioner.core.speech import parse_api_keys
 
@@ -33,3 +33,7 @@ def test_mixed_separators_and_fullwidth():
 
 def test_strips_whitespace_and_empties():
     assert parse_api_keys("  key1  ,  , key2  ") == ["key1", "key2"]
+
+
+def test_duplicate_keys_are_removed_without_reordering():
+    assert parse_api_keys("key2,key1,key2;key3 key1") == ["key2", "key1", "key3"]

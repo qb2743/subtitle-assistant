@@ -271,7 +271,7 @@ class Config(QConfig):
         "Dubbing", "Speed", 1.0, RangeValidator(0.5, 2.0)
     )
     dubbing_tts_workers = RangeConfigItem(
-        "Dubbing", "TtsWorkers", 5, RangeValidator(1, 16)
+        "Dubbing", "TtsWorkers", 5, RangeValidator(1, 50)
     )
     # 视频变速：音频超长时逐段减速画面（需选择视频）
     dubbing_video_autorate = ConfigItem(

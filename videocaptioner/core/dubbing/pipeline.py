@@ -38,6 +38,7 @@ from .models import (
     SpeakerProfile,
     elevenlabs_concurrent_per_key,
 )
+from .presets import FISHAUDIO_PRESET_VOICES
 from .rewriter import rewrite_segments_if_needed
 from .subtitle_parser import load_dubbing_segments
 from .timeline import compute_timeline_placements, write_adjusted_subtitle
@@ -86,6 +87,12 @@ def resolve_tts_worker_count(config: DubbingConfig, segment_count: int) -> int:
         per_key_cap = elevenlabs_concurrent_per_key(config.model)
         per_key = max(1, min(config.tts_workers, per_key_cap))
         worker_limit = key_count * per_key
+    elif config.provider == "fishaudio":
+        # Fish quotas are account/team-wide. This scales only when configured
+        # keys come from independent accounts; duplicate keys are ignored.
+        key_count = max(1, len(parse_api_keys(config.api_key)))
+        per_key = max(1, config.tts_workers)
+        worker_limit = key_count * per_key
     else:
         worker_limit = max(1, config.tts_workers)
     return max(1, min(worker_limit, segment_count))
@@ -119,6 +126,12 @@ class DubbingPipeline:
 
     def __init__(self, config: DubbingConfig):
         self.config = config
+        speech_extra = dict(config.extra)
+        if config.provider == "fishaudio":
+            speech_extra["concurrency_per_key"] = max(1, config.tts_workers)
+            speech_extra["shared_voice_ids"] = [
+                voice_id for _, voice_id in FISHAUDIO_PRESET_VOICES
+            ]
         speech_config = SpeechProviderConfig(
             provider=config.provider,
             api_key=config.api_key,
@@ -133,7 +146,7 @@ class DubbingPipeline:
             style_prompt=config.style_prompt,
             clone_audio_path=config.clone_audio_path,
             clone_audio_text=config.clone_audio_text,
-            extra=config.extra,
+            extra=speech_extra,
         )
         self.synthesizer = create_speech_synthesizer(speech_config)
 

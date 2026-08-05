@@ -31,7 +31,12 @@ from videocaptioner.core.utils.cache import get_tts_cache
 from videocaptioner.core.utils.logger import setup_logger
 
 from .api_keys import parse_api_keys
-from .models import SpeechProviderConfig, SynthesisRequest, SynthesisResult
+from .models import (
+    FISHAUDIO_CONCURRENT_PER_ACCOUNT_DEFAULT,
+    SpeechProviderConfig,
+    SynthesisRequest,
+    SynthesisResult,
+)
 
 logger = setup_logger("speech")
 
@@ -257,20 +262,43 @@ class FishAudioSpeechSynthesizer:
     Voice cloning uploads a reference audio via POST /model (multipart:
     type=tts, title, train_mode, voices, texts, visibility) and reuses the
     returned model ``_id`` as ``reference_id``.
+
+    Multiple keys are distributed round-robin and each key is protected by a
+    bounded semaphore. Fish Audio actually applies concurrency per account or
+    team (shared across all of that account's keys), so key-count scaling is
+    intended for keys from independent accounts.
     """
 
     DEFAULT_BASE_URL = "https://api.fish.audio"
     DEFAULT_MODEL = "s2.1-pro"
 
     def __init__(self, config: SpeechProviderConfig):
-        if not config.api_key:
-            raise ValueError("Fish Audio API key is required")
         self.config = config
+        self.api_keys = parse_api_keys(config.api_key)
+        if not self.api_keys:
+            raise ValueError("At least one Fish Audio API key is required")
         self.base_url = (config.base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self.cache = get_tts_cache()
+        try:
+            requested_limit = int(
+                self._extra(
+                    "concurrency_per_key",
+                    FISHAUDIO_CONCURRENT_PER_ACCOUNT_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            requested_limit = FISHAUDIO_CONCURRENT_PER_ACCOUNT_DEFAULT
+        self.concurrency_per_key = max(1, requested_limit)
+        self._key_semaphores = [
+            threading.BoundedSemaphore(self.concurrency_per_key) for _ in self.api_keys
+        ]
+        self._key_index = 0
+        self._key_lock = threading.Lock()
+        self._clone_lock = threading.Lock()
+        self._shared_voice_ids = set(self._extra("shared_voice_ids", ()))
 
     def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
-        reference_id = self._resolve_reference_id(request)
+        reference_id, reference_key_index = self._resolve_reference_id(request)
         payload: dict[str, Any] = {
             "text": request.text.strip(),
             "format": self.config.response_format,
@@ -281,7 +309,8 @@ class FishAudioSpeechSynthesizer:
         if reference_id:
             payload["reference_id"] = reference_id
         model = self.config.model or self.DEFAULT_MODEL
-        response = self._post_tts(payload, model)
+        key_indices = [reference_key_index] if reference_key_index is not None else None
+        response, api_key_index = self._post_tts(payload, model, key_indices=key_indices)
         fmt = self.config.response_format or "mp3"
         path = Path(request.output_path).with_suffix(f".{fmt}")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,82 +319,193 @@ class FishAudioSpeechSynthesizer:
             output_path=str(path),
             voice=reference_id or model,
             format=fmt,
-            provider_metadata={"content_type": response.headers.get("content-type", "")},
+            provider_metadata={
+                "content_type": response.headers.get("content-type", ""),
+                "api_key_index": api_key_index,
+            },
         )
 
-    def _post_tts(self, payload: dict[str, Any], model: str) -> requests.Response:
+    def _post_tts(
+        self,
+        payload: dict[str, Any],
+        model: str,
+        *,
+        key_indices: list[int] | None = None,
+    ) -> tuple[requests.Response, int]:
+        indices = key_indices or self._rotated_key_indices()
         last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = requests.post(
-                    f"{self.base_url}/v1/tts",
-                    headers={
-                        "Authorization": f"Bearer {self.config.api_key}",
-                        "Content-Type": "application/json",
-                        "model": model,
-                    },
-                    json=payload,
-                    timeout=self.config.timeout,
-                )
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "")
-                if not response.content:
-                    raise ValueError("Fish Audio TTS returned an empty audio body")
-                if "json" in content_type.lower():
-                    raise ValueError(f"Fish Audio TTS returned JSON instead of audio: {response.text[:300]}")
-                return response
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"Fish Audio TTS failed after retries: {last_error}")
+        last_status: int | None = None
+        for key_index in indices:
+            last_status = None
+            api_key = self.api_keys[key_index]
+            for retry_index in range(3):
+                response: requests.Response | None = None
+                try:
+                    with self._key_semaphores[key_index]:
+                        response = requests.post(
+                            f"{self.base_url}/v1/tts",
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                                "model": model,
+                            },
+                            json=payload,
+                            timeout=self.config.timeout,
+                        )
+                    last_status = response.status_code
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "")
+                    if not response.content:
+                        raise ValueError("Fish Audio TTS returned an empty audio body")
+                    if "json" in content_type.lower():
+                        raise ValueError("Fish Audio TTS returned JSON instead of audio")
+                    return response, key_index
+                except Exception as exc:
+                    last_error = exc
+                    status = self._response_status(response, exc)
+                    last_status = status or last_status
+                    if self._is_retryable(exc, status) and retry_index < 2:
+                        delay = self._retry_delay(response, retry_index)
+                        logger.warning(
+                            "Fish Audio key %d/%d returned %s; retrying in %.1fs",
+                            key_index + 1,
+                            len(self.api_keys),
+                            status or type(exc).__name__,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
 
-    def _resolve_reference_id(self, request: SynthesisRequest) -> str:
+            logger.warning(
+                "Fish Audio API key %d/%d failed (%s); switching to next key",
+                key_index + 1,
+                len(self.api_keys),
+                (
+                    f"HTTP {last_status}"
+                    if last_status is not None and last_status >= 400
+                    else type(last_error).__name__
+                ),
+            )
+
+        detail = self._safe_error(last_error, last_status)
+        if len(indices) > 1:
+            raise RuntimeError(
+                f"All {len(indices)} Fish Audio API keys failed; last error: {detail}"
+            ) from last_error
+        raise RuntimeError(f"Fish Audio TTS failed: {detail}") from last_error
+
+    def _rotated_key_indices(self) -> list[int]:
+        with self._key_lock:
+            start = self._key_index % len(self.api_keys)
+            self._key_index += 1
+        indices = list(range(len(self.api_keys)))
+        return indices[start:] + indices[:start]
+
+    @staticmethod
+    def _response_status(
+        response: requests.Response | None,
+        error: Exception,
+    ) -> int | None:
+        if response is not None:
+            return response.status_code
+        error_response = getattr(error, "response", None)
+        return getattr(error_response, "status_code", None)
+
+    @staticmethod
+    def _is_retryable(error: Exception, status: int | None) -> bool:
+        if status is not None:
+            return status == 429 or status >= 500
+        return isinstance(error, requests.RequestException)
+
+    @staticmethod
+    def _retry_delay(response: requests.Response | None, retry_index: int) -> float:
+        headers = response.headers if response is not None else {}
+        retry_after = headers.get("Retry-After") or headers.get("retry-after")
+        try:
+            if retry_after is not None:
+                return max(1.0, min(float(retry_after), 30.0))
+        except (TypeError, ValueError):
+            pass
+        return float(min(2**retry_index, 8))
+
+    @staticmethod
+    def _safe_error(error: Exception | None, status: int | None) -> str:
+        if isinstance(error, ValueError):
+            return str(error)
+        if status is not None and status >= 400:
+            return f"HTTP {status}"
+        return type(error).__name__ if error is not None else "unknown error"
+
+    def _resolve_reference_id(
+        self,
+        request: SynthesisRequest,
+    ) -> tuple[str, int | None]:
         # Selected voice (default preset / account voice) wins — leftover clone
         # fields from other providers (e.g. dots) must not hijack Fish Audio.
         # Clone is opt-in: only when no voice is selected AND clone audio+text
         # are both provided.
         voice = request.voice or self.config.default_voice
         if voice:
-            return voice
+            # Account-created voices are private. Public presets supplied by
+            # the dubbing pipeline may rotate; unknown IDs stay on key 1.
+            key_index = None if voice in self._shared_voice_ids else 0
+            return voice, key_index
         if request.clone_audio_path and request.clone_audio_text:
-            return self._upload_reference(request.clone_audio_path, request.clone_audio_text)
-        return ""
+            # Uploaded reference IDs are account-private. Keep clone upload and
+            # synthesis on the first key instead of rotating across accounts.
+            return (
+                self._upload_reference(
+                    request.clone_audio_path,
+                    request.clone_audio_text,
+                ),
+                0,
+            )
+        return "", None
 
     def _upload_reference(self, audio_path: str, transcript: str) -> str:
         audio_file = Path(audio_path)
         if not audio_file.exists():
             raise FileNotFoundError(f"Voice clone reference audio not found: {audio_path}")
-        cache_key = self._voice_cache_key(audio_file, transcript)
+        api_key = self.api_keys[0]
+        cache_key = self._voice_cache_key(audio_file, transcript, api_key)
         cached = self.cache.get(cache_key)
         if cached:
             return str(cached)
 
-        title = f"videocaptioner_{hashlib.md5(cache_key.encode()).hexdigest()[:12]}"
-        with audio_file.open("rb") as f:
-            response = requests.post(
-                f"{self.base_url}/model",
-                headers={"Authorization": f"Bearer {self.config.api_key}"},
-                data={
-                    "type": "tts",
-                    "title": title,
-                    "train_mode": "fast",
-                    "visibility": "unlist",
-                    "texts": transcript,
-                },
-                files={"voices": (audio_file.name, f, _guess_mime(audio_file))},
-                timeout=self.config.timeout,
-            )
-        response.raise_for_status()
-        model_id = response.json().get("_id")
-        if not model_id:
-            raise ValueError(f"Fish Audio upload did not return a model _id: {response.text}")
-        self.cache.set(cache_key, model_id, expire=86400 * 2)
-        return str(model_id)
+        with self._clone_lock:
+            cached = self.cache.get(cache_key)
+            if cached:
+                return str(cached)
+            title = f"videocaptioner_{hashlib.md5(cache_key.encode()).hexdigest()[:12]}"
+            with audio_file.open("rb") as f, self._key_semaphores[0]:
+                response = requests.post(
+                    f"{self.base_url}/model",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data={
+                        "type": "tts",
+                        "title": title,
+                        "train_mode": "fast",
+                        "visibility": "unlist",
+                        "texts": transcript,
+                    },
+                    files={"voices": (audio_file.name, f, _guess_mime(audio_file))},
+                    timeout=self.config.timeout,
+                )
+            response.raise_for_status()
+            model_id = response.json().get("_id")
+            if not model_id:
+                raise ValueError("Fish Audio upload did not return a model _id")
+            self.cache.set(cache_key, model_id, expire=86400 * 2)
+            return str(model_id)
 
-    def _voice_cache_key(self, audio_file: Path, transcript: str) -> str:
+    def _voice_cache_key(self, audio_file: Path, transcript: str, api_key: str) -> str:
         digest = hashlib.md5(audio_file.read_bytes()).hexdigest()
-        raw = f"fishaudio_voice:{self.config.model}:{digest}:{transcript}"
+        account_fingerprint = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+        raw = (
+            f"fishaudio_voice:{self.base_url}:{account_fingerprint}:"
+            f"{self.config.model}:{digest}:{transcript}"
+        )
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _extra(self, key: str, default):

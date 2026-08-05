@@ -34,6 +34,9 @@ def _datas():
     prompts = ROOT / "videocaptioner" / "core" / "prompts"
     if prompts.is_dir():
         pairs.append((str(prompts), "videocaptioner/core/prompts"))
+    voices = ROOT / "videocaptioner" / "data" / "voices"
+    if voices.is_dir():
+        pairs.append((str(voices), "videocaptioner/data/voices"))
     return pairs
 
 

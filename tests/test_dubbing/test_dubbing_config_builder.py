@@ -1,3 +1,5 @@
+import math
+
 from videocaptioner.core.entities import TranscribeLanguageEnum
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.dubbing_config_builder import (
@@ -53,6 +55,24 @@ def test_speaker_settings_are_forwarded(monkeypatch):
     assert config.speaker_count == 3
     assert config.narrator_only is True
     assert config.narrator_llm_review is True
+
+
+def test_gui_dubbing_uses_configured_gain(monkeypatch):
+    monkeypatch.setattr(cfg.dubbing_provider, "value", "edge")
+    monkeypatch.setattr(cfg.dubbing_dubbed_audio_gain_db, "value", -6)
+
+    config = create_dubbing_config_from_cfg()
+
+    assert math.isclose(20 * math.log10(config.dubbed_audio_volume), -6.0)
+
+
+def test_provider_rejects_other_provider_model(monkeypatch):
+    monkeypatch.setattr(cfg.dubbing_provider, "value", "fishaudio")
+    monkeypatch.setattr(cfg.dubbing_model, "value", "eleven_v3")
+
+    config = create_dubbing_config_from_cfg()
+
+    assert config.model == "s2.1-pro"
 
 
 def test_subtitle_style_settings_are_forwarded(monkeypatch):

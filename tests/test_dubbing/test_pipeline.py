@@ -117,6 +117,44 @@ def test_dubbing_pipeline_creates_timeline_audio(tmp_path, monkeypatch):
     assert not output.with_suffix(".dubbing.json").exists()
 
 
+def test_extra_bgm_is_mixed_without_reembed_switch(tmp_path, monkeypatch):
+    srt = tmp_path / "input.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "dub.wav"
+    calls = []
+
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: FakeSynthesizer(),
+    )
+
+    def fake_mix(dubbed_audio, **kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output_path"]).write_bytes(Path(dubbed_audio).read_bytes())
+        return kwargs["output_path"]
+
+    monkeypatch.setattr("videocaptioner.core.dubbing.pipeline.mix_background", fake_mix)
+    config = DubbingConfig(
+        provider="edge",
+        api_key="",
+        base_url="",
+        model="edge-tts",
+        voice="zh-CN-XiaoxiaoNeural",
+        embed_bgm=False,
+        bgm_loop=True,
+        extra_bgm_path="bgm.mp3",
+    )
+
+    DubbingPipeline(config).run(str(srt), str(output), work_dir=str(tmp_path / "parts"))
+
+    assert calls[0]["instrument_path"] is None
+    assert calls[0]["extra_bgm_path"] == "bgm.mp3"
+    assert calls[0]["loop"] is True
+
+
 def test_dubbing_pipeline_uses_configured_workers(tmp_path, monkeypatch):
     srt = tmp_path / "input.srt"
     srt.write_text(

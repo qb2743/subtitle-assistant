@@ -42,6 +42,7 @@ from videocaptioner.core.constant import (
     INFOBAR_DURATION_SUCCESS,
     INFOBAR_DURATION_WARNING,
 )
+from videocaptioner.core.dubbing.presets import elevenlabs_voice_options
 from videocaptioner.core.dubbing.subtitle_parser import load_dubbing_segments
 from videocaptioner.core.entities import SupportedSubtitleFormats
 from videocaptioner.core.speech.api_keys import parse_api_keys
@@ -53,7 +54,12 @@ from videocaptioner.core.voices.loader import get_all_languages, get_voices_by_l
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.components.ApiKeysEditorDialog import ApiKeysEditorDialog
 from videocaptioner.ui.components.VoicePresetManagerDialog import VoicePresetManagerDialog
-from videocaptioner.ui.dubbing_config_builder import dubbing_api_key_attr
+from videocaptioner.ui.dubbing_config_builder import (
+    ELEVENLABS_MODEL_ITEMS,
+    FISHAUDIO_MODEL_ITEMS,
+    dubbing_api_key_attr,
+    resolve_dubbing_model,
+)
 from videocaptioner.ui.task_factory import resolve_dubbing_voice
 from videocaptioner.ui.thread.dubbing_interface_thread import DubbingInterfaceThread
 from videocaptioner.ui.thread.file_download_thread import Aria2Downloader, RequestsDownloader
@@ -227,22 +233,10 @@ class TextInputCard(CardWidget):
         return self.text_edit.toPlainText().strip()
 
 
-# 各云端 provider 的模型下拉项。__init__ 初始化与 _on_provider_changed 切换时都从这里重建，
-# 避免不同 provider 的模型互相残留污染（例如切到 fishaudio 后 s 系列模型残留在 elevenlabs）。
-ELEVENLABS_MODEL_ITEMS = [
-    "eleven_flash_v2_5 - Flash v2.5 快速（推荐）",
-    "eleven_multilingual_v2 - Multilingual v2 高保真",
-    "eleven_v3 - v3 最强表现力 70+语言",
-    "eleven_turbo_v2_5 - Turbo v2.5 快速",
-    "eleven_monolingual_v1 - Monolingual v1 仅英文",
-]
-
-FISHAUDIO_MODEL_ITEMS = [
-    "s2.1-pro - s2.1 Pro 高保真（推荐）",
-    "s2.1-pro-free - s2.1 Pro 免费版（开发测试）",
-    "s2-pro - s2 Pro（上一代）",
-    "s1 - s1（旧版，13 语种）",
-]
+def _configured_voice_for_provider(provider: str) -> str | None:
+    if (cfg.dubbing_provider.value or "edge").strip().lower() != provider:
+        return None
+    return (cfg.dubbing_voice.value or "").strip()
 
 
 class DubbingInterface(QWidget):
@@ -1052,6 +1046,7 @@ class DubbingInterface(QWidget):
         """将当前配音面板状态保存到 cfg（与 TaskFactory.create_dubbing_config 一致）。"""
         if self._config_loading:
             return
+        previous_provider = (cfg.dubbing_provider.value or "edge").strip().lower()
         provider_text = self.provider_combo.currentText()
         provider = provider_text.split(" - ")[0].strip().lower()
 
@@ -1113,9 +1108,12 @@ class DubbingInterface(QWidget):
             cfg.dubbing_model.value = "voxcpm"
         if self._provider_id() in ("elevenlabs", "fishaudio"):
             model_text = self.model_combo.currentText()
-            cfg.dubbing_model.value = (
+            model = (
                 model_text.split(" - ")[0] if " - " in model_text else model_text
             )
+            cfg.dubbing_model.value = resolve_dubbing_model(provider, model)
+        elif previous_provider != provider:
+            cfg.dubbing_model.value = resolve_dubbing_model(provider, "")
         cfg.save()
 
     def _primary_api_key(self) -> str:
@@ -1676,30 +1674,29 @@ class DubbingInterface(QWidget):
             # 重建模型下拉为 ElevenLabs 模型，清掉从 fishaudio 等切换时残留的模型项
             self._rebuild_model_combo(ELEVENLABS_MODEL_ITEMS)
 
-            # 尝试从缓存加载音色列表
+            # 内置预设始终可选，缓存中的账户音色追加在后。
             cached_voices = self._load_voice_cache(provider)
+            voice_options = [
+                (voice.name, voice.voice_id) for voice in elevenlabs_voice_options()
+            ]
+            voice_options.extend(
+                (voice.get("name", "Unknown"), voice.get("voice_id", ""))
+                for voice in cached_voices
+            )
+            self.voice_combo.clear()
+            seen = set()
+            for name, voice_id in voice_options:
+                if voice_id and voice_id not in seen:
+                    self.voice_combo.addItem(str(name), userData=voice_id)
+                    seen.add(voice_id)
+            saved = _configured_voice_for_provider(provider)
+            if saved and saved not in seen:
+                self.voice_combo.addItem(saved, userData=saved)
+            target = saved if saved is not None else self.voice_combo.itemData(0)
+            index = self.voice_combo.findData(target)
+            self.voice_combo.setCurrentIndex(index if index >= 0 else 0)
             if cached_voices:
-                self.voice_combo.clear()
-                for voice in cached_voices:
-                    name = voice.get("name", "Unknown")
-                    voice_id = voice.get("voice_id", "")
-                    if voice_id:
-                        self.voice_combo.addItem(f"{name}", userData=voice_id)
                 logger.info(f"已从缓存加载 {len(cached_voices)} 个 ElevenLabs 音色")
-                saved = (cfg.dubbing_voice.value or "").strip()
-                if saved and not saved.endswith("Neural"):
-                    for i in range(self.voice_combo.count()):
-                        if self.voice_combo.itemData(i) == saved:
-                            self.voice_combo.setCurrentIndex(i)
-                            break
-                elif self.voice_combo.count() > 0:
-                    self.voice_combo.setCurrentIndex(0)
-            else:
-                saved = (cfg.dubbing_voice.value or "").strip()
-                if saved.endswith("Neural"):
-                    cfg.dubbing_voice.value = ""
-                    cfg.save()
-                self.voice_combo.clear()
 
             # 如果有 API Key，自动查询配额
             if self._primary_api_key():
@@ -1786,11 +1783,15 @@ class DubbingInterface(QWidget):
             for name, rid in FISHAUDIO_PRESET_VOICES:
                 self.voice_combo.addItem(name, userData=rid)
             self.voice_combo.addItem("参考音频克隆（需填上方参考音频）", userData="")
-            saved_voice = (cfg.dubbing_voice.value or "").strip()
+            saved_voice = _configured_voice_for_provider(provider)
             preset_ids = {rid for _, rid in FISHAUDIO_PRESET_VOICES}
             if saved_voice and saved_voice not in preset_ids:
                 self.voice_combo.addItem(saved_voice, userData=saved_voice)
-            target = saved_voice if saved_voice else self.voice_combo.itemData(0)
+            target = (
+                saved_voice
+                if saved_voice is not None
+                else self.voice_combo.itemData(0)
+            )
             for i in range(self.voice_combo.count()):
                 if self.voice_combo.itemData(i) == target:
                     self.voice_combo.setCurrentIndex(i)

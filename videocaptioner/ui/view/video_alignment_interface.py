@@ -41,10 +41,17 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from videocaptioner.config import MODEL_PATH
+from videocaptioner.config import CACHE_PATH, MODEL_PATH
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
     INFOBAR_DURATION_WARNING,
+)
+from videocaptioner.core.dubbing.presets import (
+    EDGE_VOICE_ALIASES,
+    FISHAUDIO_PRESET_VOICES,
+    GEMINI_VOICES,
+    SILICONFLOW_VOICE_ALIASES,
+    elevenlabs_voice_options,
 )
 from videocaptioner.core.entities import (
     SubtitleLayoutEnum,
@@ -53,7 +60,7 @@ from videocaptioner.core.entities import (
     TranscribeModelEnum,
     TranslatorServiceEnum,
 )
-from videocaptioner.core.translate.types import TargetLanguage
+from videocaptioner.core.translate.types import GOOGLE_LANG_MAP, TargetLanguage
 from videocaptioner.core.utils.model_downloader import ModelDownloader
 from videocaptioner.core.utils.model_urls import (
     DIARIZATION_MULTILINGUAL_MODEL_SIZE,
@@ -61,8 +68,14 @@ from videocaptioner.core.utils.model_urls import (
     diarization_model_urls,
 )
 from videocaptioner.core.utils.platform_utils import open_folder
+from videocaptioner.core.voices.loader import load_edge_voices_from_json
 from videocaptioner.ui.common.config import cfg
-from videocaptioner.ui.dubbing_config_builder import diarization_language_from_transcribe
+from videocaptioner.ui.dubbing_config_builder import (
+    diarization_language_from_transcribe,
+    dubbing_model_options,
+    resolve_dubbing_model,
+    resolve_dubbing_voice,
+)
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.video_info_thread import VideoInfoThread
 from videocaptioner.ui.thread.video_translation_thread import (
@@ -72,6 +85,74 @@ from videocaptioner.ui.thread.video_translation_thread import (
 from videocaptioner.ui.view.subtitle_interface import SubtitleInterface
 
 REVIEW_TIMEOUT_SECONDS = 30
+
+_OPENAI_VOICE_OPTIONS = [
+    ("Alloy - 中性", "alloy"),
+    ("Echo - 男声", "echo"),
+    ("Fable - 英式男声", "fable"),
+    ("Onyx - 深沉男声", "onyx"),
+    ("Nova - 女声", "nova"),
+    ("Shimmer - 女声", "shimmer"),
+]
+_DEFAULT_VOICES = {
+    "edge": EDGE_VOICE_ALIASES["xiaoxiao"],
+    "elevenlabs": "21m00Tcm4TlvDq8ikWAM",
+    "gemini": "Kore",
+    "siliconflow": SILICONFLOW_VOICE_ALIASES["alex"],
+    "openai": "alloy",
+    "fishaudio": FISHAUDIO_PRESET_VOICES[0][1],
+}
+
+
+def _cached_voice_options(provider: str) -> list[tuple[str, str]]:
+    try:
+        data = json.loads((CACHE_PATH / f"voices_{provider}.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        return []
+    return [
+        (str(item.get("name") or item.get("voice_id")), str(item["voice_id"]))
+        for item in data
+        if isinstance(item, dict) and item.get("voice_id")
+    ]
+
+
+def alignment_voice_options(
+    provider: str, target_language: TargetLanguage | None
+) -> list[tuple[str, str]]:
+    """Return local, non-blocking voice choices for the alignment page."""
+    provider = provider.strip().lower()
+    if provider == "edge":
+        language_code = GOOGLE_LANG_MAP.get(target_language, "zh-CN").split("-", 1)[0]
+        if language_code == "tl":
+            language_code = "fil"
+        return list(load_edge_voices_from_json().get(language_code, {}).items())
+    if provider == "elevenlabs":
+        options = [(voice.name, voice.voice_id) for voice in elevenlabs_voice_options()]
+        options.extend(_cached_voice_options(provider))
+    elif provider == "gemini":
+        options = [(voice, voice) for voice in sorted(GEMINI_VOICES)]
+    elif provider == "siliconflow":
+        options = [
+            ("Anna - 女声", SILICONFLOW_VOICE_ALIASES["anna"]),
+            ("Alex - 男声", SILICONFLOW_VOICE_ALIASES["alex"]),
+            ("Benjamin - 深沉男声", SILICONFLOW_VOICE_ALIASES["benjamin"]),
+        ]
+    elif provider == "openai":
+        options = list(_OPENAI_VOICE_OPTIONS)
+    elif provider == "fishaudio":
+        options = list(FISHAUDIO_PRESET_VOICES)
+        options.extend(_cached_voice_options(provider))
+        options.append(("参考音频克隆（沿用配音面板设置）", ""))
+    else:
+        return []
+
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, voice in options:
+        if voice not in seen:
+            unique.append((name, voice))
+            seen.add(voice)
+    return unique
 
 
 def _multilingual_diarization_model_path() -> Path:
@@ -466,6 +547,8 @@ class VideoAlignmentInterface(QWidget):
         self._config_loading = True
         self._setup_ui()
         self._load_config()
+        self._refresh_tts_models()
+        self._refresh_tts_voices()
         self._config_loading = False
 
     def _setup_ui(self):
@@ -508,7 +591,13 @@ class VideoAlignmentInterface(QWidget):
             "dots - Dots-TTS (本地)", "voxcpm - VoxCPM (本地)",
         ])
         self._add_widget_row(workflow_right, "配音渠道", self.tts_provider_combo)
-        voice_hint = BodyLabel("音色和 API 密钥沿用“配音”面板设置。", self)
+        self.tts_model_combo = ComboBox(self)
+        self.tts_model_combo.setPlaceholderText("当前渠道无需选择模型")
+        self._add_widget_row(workflow_right, "配音模型", self.tts_model_combo)
+        self.tts_voice_combo = ComboBox(self)
+        self.tts_voice_combo.setPlaceholderText("选择音色")
+        self._add_widget_row(workflow_right, "音色", self.tts_voice_combo)
+        voice_hint = BodyLabel("API 密钥和参考音频沿用“配音”面板设置。", self)
         voice_hint.setStyleSheet("color: #888; font-size: 12px;")
         workflow_right.addWidget(voice_hint)
         self.optimize_switch = self._switch_row(workflow_right, "字幕校正", bool(cfg.need_optimize.value))
@@ -590,10 +679,20 @@ class VideoAlignmentInterface(QWidget):
         embed_row.addWidget(self.subtitle_style_btn)
         options_right.addLayout(embed_row)
         self.gap_ms_spin = self._spin_row(options_right, "语音间隔", 0, 2000, " ms", int(cfg.dubbing_subtitle_gap_ms.value))
+        self.dubbed_gain_spin = self._spin_row(
+            options_right,
+            "主配音增益",
+            -20,
+            20,
+            " dB",
+            int(cfg.dubbing_dubbed_audio_gain_db.value),
+        )
         self.separate_vocal_switch = self._switch_row(options_right, "分离人声背景声", bool(cfg.dubbing_separate_vocal.value))
         self.embed_bgm_switch = self._switch_row(options_right, "重新嵌入背景声", bool(cfg.dubbing_embed_bgm.value))
         self.bgm_loop_switch = self._switch_row(options_right, "背景音循环", bool(cfg.dubbing_bgm_loop.value))
-        self.bgm_volume_slider, self.bgm_volume_spin = self._volume_row(options_right, float(cfg.dubbing_bgm_volume.value))
+        self.bgm_volume_slider, self.bgm_volume_spin = self._volume_row(
+            options_right, float(cfg.dubbing_bgm_volume.value)
+        )
         self.extra_bgm_edit = LineEdit(self)
         self.extra_bgm_edit.setReadOnly(True)
         self.extra_bgm_edit.setText(cfg.dubbing_extra_bgm_path.value or "")
@@ -641,14 +740,18 @@ class VideoAlignmentInterface(QWidget):
         root.addWidget(self.scroll_area)
 
         self.video_input.fileSelected.connect(self._on_video_selected)
+        self.tts_provider_combo.currentIndexChanged.connect(self._on_tts_provider_changed)
+        self.target_language_combo.currentIndexChanged.connect(self._refresh_tts_voices)
         for widget in (
             self.transcribe_model_combo, self.source_language_combo,
-            self.target_language_combo, self.translator_combo, self.tts_provider_combo,
+            self.target_language_combo, self.translator_combo,
+            self.tts_model_combo, self.tts_voice_combo,
             self.optimize_switch, self.split_switch, self.max_cjk_spin,
             self.max_words_spin, self.diarization_switch, self.speaker_count_combo,
             self.narrator_only_switch, self.llm_review_switch,
             self.video_autorate_switch, self.random_mirror_switch, self.random_color_switch,
             self.canvas_combo, self.embed_combo, self.gap_ms_spin,
+            self.dubbed_gain_spin,
             self.separate_vocal_switch, self.embed_bgm_switch, self.bgm_loop_switch,
             self.bgm_volume_slider, self.bgm_volume_spin, self.extra_bgm_edit,
             self.output_dir_edit,
@@ -661,6 +764,7 @@ class VideoAlignmentInterface(QWidget):
         self.narrator_only_switch.checkedChanged.connect(self._update_enabled)
         self.embed_bgm_switch.checkedChanged.connect(self._update_enabled)
         self.separate_vocal_switch.checkedChanged.connect(self._update_enabled)
+        self.extra_bgm_edit.textChanged.connect(self._update_enabled)
         self._update_enabled()
 
     def _enum_combo(self, layout, label, enum_type, value):
@@ -822,6 +926,61 @@ class VideoAlignmentInterface(QWidget):
         index = self.embed_combo.findData(cfg.dubbing_embed_subtitle.value or "none")
         self.embed_combo.setCurrentIndex(index if index >= 0 else 0)
 
+    def _tts_provider_id(self) -> str:
+        return self.tts_provider_combo.currentText().split(" - ", 1)[0].strip().lower()
+
+    def _on_tts_provider_changed(self, *_args):
+        self._refresh_tts_models()
+        self._refresh_tts_voices()
+        self._persist()
+
+    def _refresh_tts_models(self):
+        provider = self._tts_provider_id()
+        options = dubbing_model_options(provider)
+        saved_model = ""
+        if (cfg.dubbing_provider.value or "edge") == provider:
+            saved_model = (cfg.dubbing_model.value or "").strip()
+
+        self.tts_model_combo.blockSignals(True)
+        self.tts_model_combo.clear()
+        for text, model in options:
+            self.tts_model_combo.addItem(text, userData=model)
+        if options:
+            model = resolve_dubbing_model(provider, saved_model)
+            index = self.tts_model_combo.findData(model)
+            self.tts_model_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.tts_model_combo.setEnabled(True)
+        else:
+            model = resolve_dubbing_model(provider, saved_model)
+            self.tts_model_combo.addItem("当前渠道使用默认模型", userData=model)
+            self.tts_model_combo.setEnabled(False)
+        self.tts_model_combo.blockSignals(False)
+
+    def _refresh_tts_voices(self, *_args):
+        provider = self._tts_provider_id()
+        options = alignment_voice_options(provider, self.target_language_combo.currentData())
+        saved_voice = ""
+        if (cfg.dubbing_provider.value or "edge") == provider:
+            saved_voice = (cfg.dubbing_voice.value or "").strip()
+        option_ids = {voice for _name, voice in options}
+        if provider != "edge" and saved_voice and saved_voice not in option_ids:
+            options.append((f"当前音色 - {saved_voice}", saved_voice))
+            option_ids.add(saved_voice)
+
+        self.tts_voice_combo.blockSignals(True)
+        self.tts_voice_combo.clear()
+        if not options:
+            self.tts_voice_combo.addItem("使用“配音”面板的参考音频", userData="")
+            self.tts_voice_combo.setEnabled(False)
+        else:
+            for name, voice in options:
+                self.tts_voice_combo.addItem(name, userData=voice)
+            target = saved_voice if saved_voice in option_ids else _DEFAULT_VOICES.get(provider)
+            index = self.tts_voice_combo.findData(target)
+            self.tts_voice_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.tts_voice_combo.setEnabled(True)
+        self.tts_voice_combo.blockSignals(False)
+
     def _persist(self, *_args):
         if self._config_loading:
             return
@@ -834,7 +993,14 @@ class VideoAlignmentInterface(QWidget):
         cfg.need_split.value = self.split_switch.isChecked()
         cfg.max_word_count_cjk.value = self.max_cjk_spin.value()
         cfg.max_word_count_english.value = self.max_words_spin.value()
-        cfg.dubbing_provider.value = self.tts_provider_combo.currentText().split(" - ", 1)[0]
+        provider = self._tts_provider_id()
+        cfg.dubbing_provider.value = provider
+        cfg.dubbing_model.value = resolve_dubbing_model(
+            provider, str(self.tts_model_combo.currentData() or "")
+        )
+        cfg.dubbing_voice.value = resolve_dubbing_voice(
+            provider, str(self.tts_voice_combo.currentData() or "")
+        )
         cfg.dubbing_enable_diarization.value = self.diarization_switch.isChecked()
         cfg.dubbing_speaker_count.value = int(self.speaker_count_combo.currentData() or 0)
         cfg.dubbing_narrator_only.value = self.narrator_only_switch.isChecked()
@@ -845,6 +1011,7 @@ class VideoAlignmentInterface(QWidget):
         cfg.dubbing_canvas.value = self.canvas_combo.currentData() or "off"
         cfg.dubbing_embed_subtitle.value = self.embed_combo.currentData() or "none"
         cfg.dubbing_subtitle_gap_ms.value = self.gap_ms_spin.value()
+        cfg.dubbing_dubbed_audio_gain_db.value = self.dubbed_gain_spin.value()
         cfg.dubbing_separate_vocal.value = self.separate_vocal_switch.isChecked()
         cfg.dubbing_embed_bgm.value = self.embed_bgm_switch.isChecked()
         cfg.dubbing_bgm_loop.value = self.bgm_loop_switch.isChecked()
@@ -861,7 +1028,9 @@ class VideoAlignmentInterface(QWidget):
         self.speaker_count_combo.setEnabled(enabled)
         self.narrator_only_switch.setEnabled(enabled)
         self.llm_review_switch.setEnabled(enabled and self.narrator_only_switch.isChecked())
-        bgm_enabled = self.embed_bgm_switch.isChecked()
+        bgm_enabled = self.embed_bgm_switch.isChecked() or bool(
+            self.extra_bgm_edit.text().strip()
+        )
         self.bgm_loop_switch.setEnabled(bgm_enabled)
         self.bgm_volume_slider.setEnabled(bgm_enabled)
         self.bgm_volume_spin.setEnabled(bgm_enabled)

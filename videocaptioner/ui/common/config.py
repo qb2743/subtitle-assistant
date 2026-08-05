@@ -274,6 +274,9 @@ class Config(QConfig):
     dubbing_subtitle_gap_ms = RangeConfigItem(
         "Dubbing", "SubtitleGapMs", 0, RangeValidator(0, 2000)
     )
+    dubbing_dubbed_audio_gain_db = RangeConfigItem(
+        "Dubbing", "DubbedAudioGainDb", 8, RangeValidator(-20, 20)
+    )
     # 嵌入硬字幕："none" 不嵌入 | "hard" 烧录进输出视频（需选择视频）
     dubbing_embed_subtitle = OptionsConfigItem(
         "Dubbing", "EmbedSubtitle", "none", OptionsValidator(["none", "hard"])

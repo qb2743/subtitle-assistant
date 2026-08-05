@@ -124,6 +124,16 @@ class HomeInterface(QWidget):
         # 当堆叠控件的当前索引改变时，更新分段控件的当前项
         widget = self.stackedWidget.widget(index)
         if widget:
+            if widget is self.dubbing_interface:
+                widget.load_config()
+            elif widget is self.video_alignment_interface:
+                widget._config_loading = True
+                try:
+                    widget._load_config()
+                    widget._refresh_tts_models()
+                    widget._refresh_tts_voices()
+                finally:
+                    widget._config_loading = False
             self.pivot.setCurrentItem(widget.objectName())
 
     def closeEvent(self, event):

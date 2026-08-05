@@ -2,9 +2,11 @@ import json
 from types import SimpleNamespace
 
 import videocaptioner.ui.view.dubbing_interface as dubbing_module
+import videocaptioner.ui.view.home_interface as home_module
 import videocaptioner.ui.view.video_alignment_interface as alignment_module
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
 from videocaptioner.core.entities import TranscribeLanguageEnum
+from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.ui.thread.video_translation_thread import (
     REVIEW_WAIT_TIMEOUT_SECONDS,
     VideoTranslationThread,
@@ -32,6 +34,25 @@ class _Combo:
     def setCurrentIndex(self, index):
         self.index = index
 
+    def currentText(self):
+        return self.items[self.index][0] if self.items else ""
+
+    def currentData(self):
+        return self.items[self.index][1] if self.items else None
+
+    def clear(self):
+        self.items.clear()
+        self.index = 0
+
+    def addItem(self, text, userData=None):
+        self.items.append((text, userData))
+
+    def blockSignals(self, _blocked):
+        pass
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
+
 
 class _Widget:
     def __init__(self, value):
@@ -54,6 +75,9 @@ class _Widget:
 
     def toPlainText(self):
         return str(self._value)
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
 
 
 class _UnexpectedWidget:
@@ -84,6 +108,128 @@ def test_video_alignment_loads_saved_canvas_and_subtitle_mode(monkeypatch):
 
     assert interface.canvas_combo.index == 1
     assert interface.embed_combo.index == 1
+
+
+def test_alignment_voice_options_match_provider_and_target_language():
+    english_edge = alignment_module.alignment_voice_options(
+        "edge", TargetLanguage.ENGLISH_US
+    )
+    assert english_edge
+    assert all(voice.startswith("en-") for _name, voice in english_edge)
+
+    openai = dict(alignment_module.alignment_voice_options("openai", None))
+    assert openai["Nova - 女声"] == "nova"
+    assert alignment_module.alignment_voice_options("voxcpm", None) == []
+
+
+def test_alignment_provider_switch_drops_previous_provider_voice(monkeypatch):
+    fake_cfg = SimpleNamespace(
+        dubbing_provider=_item("edge"),
+        dubbing_voice=_item("zh-CN-XiaoxiaoNeural"),
+    )
+    monkeypatch.setattr(alignment_module, "cfg", fake_cfg)
+    voice_combo = _Combo([])
+    interface = SimpleNamespace(
+        tts_provider_combo=_Combo([("openai - OpenAI TTS", None)]),
+        target_language_combo=_Widget(TargetLanguage.ENGLISH),
+        tts_voice_combo=voice_combo,
+        _tts_provider_id=lambda: "openai",
+    )
+
+    alignment_module.VideoAlignmentInterface._refresh_tts_voices(interface)
+
+    assert voice_combo.currentData() == "alloy"
+    assert all(data != "zh-CN-XiaoxiaoNeural" for _name, data in voice_combo.items)
+
+
+def test_alignment_provider_switch_uses_matching_model(monkeypatch):
+    fake_cfg = SimpleNamespace(
+        dubbing_provider=_item("fishaudio"),
+        dubbing_model=_item("s2.1-pro"),
+    )
+    monkeypatch.setattr(alignment_module, "cfg", fake_cfg)
+    model_combo = _Combo([])
+    interface = SimpleNamespace(
+        tts_provider_combo=_Combo([("elevenlabs - ElevenLabs", None)]),
+        tts_model_combo=model_combo,
+        _tts_provider_id=lambda: "elevenlabs",
+    )
+
+    alignment_module.VideoAlignmentInterface._refresh_tts_models(interface)
+
+    assert model_combo.currentData() == "eleven_flash_v2_5"
+    assert all(not data.startswith("s2") for _name, data in model_combo.items)
+
+
+def test_home_refreshes_dubbing_controls_when_switching_pages():
+    events = []
+    dubbing = SimpleNamespace(
+        load_config=lambda: events.append("dubbing"),
+        objectName=lambda: "DubbingInterface",
+    )
+    alignment = SimpleNamespace(
+        _config_loading=False,
+        _load_config=lambda: events.append("alignment-config"),
+        _refresh_tts_models=lambda: events.append("alignment-model"),
+        _refresh_tts_voices=lambda: events.append("alignment-voice"),
+        objectName=lambda: "VideoAlignmentInterface",
+    )
+    interface = SimpleNamespace(
+        dubbing_interface=dubbing,
+        video_alignment_interface=alignment,
+        stackedWidget=SimpleNamespace(widget=lambda index: (dubbing, alignment)[index]),
+        pivot=SimpleNamespace(setCurrentItem=lambda name: events.append(name)),
+    )
+
+    home_module.HomeInterface.onCurrentIndexChanged(interface, 0)
+    home_module.HomeInterface.onCurrentIndexChanged(interface, 1)
+
+    assert events == [
+        "dubbing",
+        "DubbingInterface",
+        "alignment-config",
+        "alignment-model",
+        "alignment-voice",
+        "VideoAlignmentInterface",
+    ]
+    assert alignment._config_loading is False
+
+
+def test_dubbing_page_preserves_empty_fish_clone_voice(monkeypatch):
+    fake_cfg = SimpleNamespace(
+        dubbing_provider=_item("fishaudio"),
+        dubbing_voice=_item(""),
+    )
+    monkeypatch.setattr(dubbing_module, "cfg", fake_cfg)
+
+    assert dubbing_module._configured_voice_for_provider("fishaudio") == ""
+    assert dubbing_module._configured_voice_for_provider("elevenlabs") is None
+
+
+def test_extra_bgm_enables_loop_and_volume_controls():
+    loop = _Widget(False)
+    slider = _Widget(0)
+    spin = _Widget(0)
+    interface = SimpleNamespace(
+        split_switch=_Widget(True),
+        max_cjk_spin=_Widget(28),
+        max_words_spin=_Widget(20),
+        diarization_switch=_Widget(False),
+        speaker_count_combo=_Widget(0),
+        narrator_only_switch=_Widget(False),
+        llm_review_switch=_Widget(False),
+        embed_bgm_switch=_Widget(False),
+        extra_bgm_edit=_Widget("D:/music/bgm.mp3"),
+        bgm_loop_switch=loop,
+        bgm_volume_slider=slider,
+        bgm_volume_spin=spin,
+    )
+
+    alignment_module.VideoAlignmentInterface._update_enabled(interface)
+
+    assert loop.enabled is True
+    assert slider.enabled is True
+    assert spin.enabled is True
 
 
 def test_hidden_dubbing_controls_do_not_overwrite_alignment_settings(monkeypatch):

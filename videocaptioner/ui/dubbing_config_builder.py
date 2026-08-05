@@ -13,6 +13,55 @@ _OPENAI_TTS_VOICES = frozenset(
     {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
 )
 
+ELEVENLABS_MODEL_ITEMS = [
+    "eleven_flash_v2_5 - Flash v2.5 快速（推荐）",
+    "eleven_multilingual_v2 - Multilingual v2 高保真",
+    "eleven_v3 - v3 最强表现力 70+语言",
+    "eleven_turbo_v2_5 - Turbo v2.5 快速",
+    "eleven_monolingual_v1 - Monolingual v1 仅英文",
+]
+
+FISHAUDIO_MODEL_ITEMS = [
+    "s2.1-pro - s2.1 Pro 高保真（推荐）",
+    "s2.1-pro-free - s2.1 Pro 免费版（开发测试）",
+    "s2-pro - s2 Pro（上一代）",
+    "s1 - s1（旧版，13 语种）",
+]
+
+_MODEL_ITEMS_BY_PROVIDER = {
+    "elevenlabs": ELEVENLABS_MODEL_ITEMS,
+    "fishaudio": FISHAUDIO_MODEL_ITEMS,
+}
+
+_DEFAULT_MODELS = {
+    "edge": "edge-tts",
+    "elevenlabs": "eleven_flash_v2_5",
+    "gemini": "gemini-3.1-flash-tts-preview",
+    "siliconflow": "FunAudioLLM/CosyVoice2-0.5B",
+    "openai": "tts-1",
+    "fishaudio": "s2.1-pro",
+    "dots": "dots-tts",
+    "voxcpm": "voxcpm",
+}
+
+
+def dubbing_model_options(provider: str) -> list[tuple[str, str]]:
+    """Return display text and model id for providers with model choices."""
+    return [
+        (item, item.split(" - ", 1)[0])
+        for item in _MODEL_ITEMS_BY_PROVIDER.get(provider, ())
+    ]
+
+
+def resolve_dubbing_model(provider: str, model: str) -> str:
+    """Keep Fish Audio and ElevenLabs models within their provider."""
+    model = (model or "").strip()
+    options = dubbing_model_options(provider)
+    if options:
+        valid = {model_id for _text, model_id in options}
+        return model if model in valid else options[0][1]
+    return model or _DEFAULT_MODELS.get(provider, "")
+
 
 def resolve_dubbing_voice(provider: str, voice: str) -> str:
     """Return a voice id valid for the given TTS provider."""
@@ -62,13 +111,11 @@ _VALID_PROVIDERS = (
     "fishaudio",
 )
 
-_DEFAULT_ELEVENLABS_MODEL = "eleven_flash_v2_5"
 _DEFAULT_SILICONFLOW_BASE = "https://api.siliconflow.cn/v1"
 _DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _DEFAULT_SILICONFLOW_MODEL = "FunAudioLLM/CosyVoice2-0.5B"
 _DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-tts-preview"
 _DEFAULT_FISHAUDIO_BASE = "https://api.fish.audio"
-_DEFAULT_FISHAUDIO_MODEL = "s2.1-pro"
 
 _DUBBING_API_KEY_ATTRS = {
     "elevenlabs": "dubbing_api_key_elevenlabs",
@@ -189,9 +236,7 @@ def _provider_defaults(provider: str) -> tuple[str, str]:
             api_base = "https://api.openai.com/v1"
         return model, api_base
     if provider == "elevenlabs":
-        if not model:
-            model = _DEFAULT_ELEVENLABS_MODEL
-        return model, ""
+        return resolve_dubbing_model(provider, model), ""
     if provider == "siliconflow":
         if not model:
             model = _DEFAULT_SILICONFLOW_MODEL
@@ -207,8 +252,7 @@ def _provider_defaults(provider: str) -> tuple[str, str]:
     if provider == "edge":
         return model or "edge-tts", ""
     if provider == "fishaudio":
-        if not model:
-            model = _DEFAULT_FISHAUDIO_MODEL
+        model = resolve_dubbing_model(provider, model)
         if not api_base:
             api_base = _DEFAULT_FISHAUDIO_BASE
         return model, api_base
@@ -271,6 +315,8 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         llm_model=llm_model if (rewrite or narrator_review) else "",
         mix_original_audio=mix_original,
         original_audio_volume=original_vol,
+        dubbed_audio_volume=10
+        ** (float(cfg.dubbing_dubbed_audio_gain_db.value) / 20),
         clone_audio_path=clone_audio_path,
         clone_audio_text=clone_audio_text,
         extra={

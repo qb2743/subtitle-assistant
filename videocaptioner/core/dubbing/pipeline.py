@@ -342,15 +342,14 @@ class DubbingPipeline:
             volume=self.config.dubbed_audio_volume,
         )
 
-        if self.config.embed_bgm and (
-            instrument_path or self.config.extra_bgm_path
-        ):
+        instrument_to_mix = instrument_path if self.config.embed_bgm else None
+        if instrument_to_mix or self.config.extra_bgm_path:
             cb(89, "mixing background audio")
             try:
                 mixed = work / "dubbed_bgm.wav"
                 mix_background(
                     str(out_audio),
-                    instrument_path=instrument_path,
+                    instrument_path=instrument_to_mix,
                     volume=self.config.bgm_volume,
                     loop=self.config.bgm_loop,
                     extra_bgm_path=self.config.extra_bgm_path or None,

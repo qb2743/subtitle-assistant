@@ -868,6 +868,8 @@ class VideoAlignmentInterface(QWidget):
         style_interface = getattr(main_window, "subtitleStyleInterface", None)
         switch_to = getattr(main_window, "switchTo", None)
         if style_interface is not None and callable(switch_to):
+            if self.video_input.file_path:
+                style_interface.setPreviewVideo(self.video_input.file_path)
             switch_to(style_interface)
             style_interface.updatePreview()
             return
@@ -899,6 +901,11 @@ class VideoAlignmentInterface(QWidget):
         except OSError:
             return
 
+        cfg.set(cfg.subtitle_preview_video, path)
+        style_interface = getattr(self.window(), "subtitleStyleInterface", None)
+        if style_interface is not None:
+            style_interface.setPreviewVideo(path)
+
         fingerprint = f"{video_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
         cache_key = sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
         thumbnail_path = (
@@ -923,7 +930,10 @@ class VideoAlignmentInterface(QWidget):
     def _set_subtitle_preview_background(self, thumbnail_path: str, selected_video: str):
         if self.video_input.file_path != selected_video:
             return
+        if cfg.get(cfg.subtitle_preview_video) != selected_video:
+            return
         cfg.set(cfg.subtitle_preview_image, thumbnail_path)
+        cfg.set(cfg.subtitle_preview_video, selected_video)
         style_interface = getattr(self.window(), "subtitleStyleInterface", None)
         if style_interface is not None:
             style_interface.updatePreview()

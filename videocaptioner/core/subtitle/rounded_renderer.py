@@ -198,6 +198,58 @@ def render_subtitle_image(
     return image
 
 
+def _scale_preview_style(
+    style: RoundedBgStyle,
+    height: int,
+    reference_height: int,
+) -> RoundedBgStyle:
+    scale_factor = height / reference_height
+    if scale_factor == 1.0:
+        return style
+    return replace(
+        style,
+        font_size=max(1, int(style.font_size * scale_factor)),
+        corner_radius=max(0, int(style.corner_radius * scale_factor)),
+        padding_h=max(0, int(style.padding_h * scale_factor)),
+        padding_v=max(0, int(style.padding_v * scale_factor)),
+        margin_bottom=max(0, int(style.margin_bottom * scale_factor)),
+        line_spacing=max(0, int(style.line_spacing * scale_factor)),
+        letter_spacing=max(0, int(style.letter_spacing * scale_factor)),
+    )
+
+
+def render_rounded_overlay(
+    primary_text: str,
+    secondary_text: str,
+    width: int,
+    height: int,
+    style: Optional[RoundedBgStyle] = None,
+    reference_height: int = 720,
+) -> str:
+    """Render a rounded-background subtitle as a transparent RGBA image."""
+    width, height = max(1, int(width)), max(1, int(height))
+    style = _scale_preview_style(style or RoundedBgStyle(), height, reference_height)
+    subtitle_img = render_subtitle_image(
+        primary_text,
+        secondary_text,
+        width,
+        height,
+        style,
+    )
+    output_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".png", delete=False
+        ) as tmp_file:
+            output_path = Path(tmp_file.name)
+            subtitle_img.save(tmp_file, "PNG")
+        return str(output_path)
+    except Exception:
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+        raise
+
+
 def render_preview(
     primary_text: str,
     secondary_text: str = "",
@@ -250,20 +302,7 @@ def render_preview(
     # 确保 width 和 height 不为 None（类型收窄）
     assert width is not None and height is not None
 
-    # 从样式中获取参考高度，根据图片高度自动缩放样式
-    scale_factor = height / reference_height
-
-    if scale_factor != 1.0:
-        style = replace(
-            style,
-            font_size=int(style.font_size * scale_factor),
-            corner_radius=int(style.corner_radius * scale_factor),
-            padding_h=int(style.padding_h * scale_factor),
-            padding_v=int(style.padding_v * scale_factor),
-            margin_bottom=int(style.margin_bottom * scale_factor),
-            line_spacing=int(style.line_spacing * scale_factor),
-            letter_spacing=int(style.letter_spacing * scale_factor),
-        )
+    style = _scale_preview_style(style, height, reference_height)
 
     # 渲染字幕并叠加
     subtitle_img = render_subtitle_image(primary_text, secondary_text, width, height, style)

@@ -421,9 +421,10 @@ class SettingInterface(ScrollArea):
                 config["model_cfg"],
                 FIF.ROBOT,  # type: ignore
                 self.tr("模型"),
-                self.tr("选择主模型；用英文逗号追加备用模型，失败时自动切换"),
+                self.tr("按优先级选择主模型和备用模型，失败时自动切换"),
                 config["default_models"],
                 self.llmGroup,
+                multiSelect=True,
             )
             setattr(self, f"{prefix}_model_card", model_card)
 
@@ -819,9 +820,7 @@ class SettingInterface(ScrollArea):
             # 更新当前服务的模型列表
             service_config = self.llm_service_configs.get(current_service)
             if service_config and service_config["model"]:
-                temp = service_config["model"].comboBox.currentText()
                 service_config["model"].setItems(models)
-                service_config["model"].setValue(temp)
 
             InfoBar.success(
                 self.tr("获取模型列表成功:"),

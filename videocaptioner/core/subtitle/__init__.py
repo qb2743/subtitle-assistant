@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from .ass_renderer import render_ass_preview, render_ass_video
+from .ass_renderer import render_ass_overlay, render_ass_preview, render_ass_video
 from .ass_utils import (
     AssInfo,
     AssStyle,
@@ -21,7 +21,11 @@ from .font_utils import (
     get_font_variants,
     get_system_fonts,
 )
-from .rounded_renderer import render_preview, render_rounded_video
+from .rounded_renderer import (
+    render_preview,
+    render_rounded_overlay,
+    render_rounded_video,
+)
 from .style_manager import (
     SecondaryStyle,
     StyleMode,
@@ -48,12 +52,14 @@ def get_subtitle_style(style_name: str) -> Optional[str]:
 __all__ = [
     "render_ass_video",
     "render_ass_preview",
+    "render_ass_overlay",
     "auto_wrap_ass_file",
     "parse_ass_info",
     "wrap_ass_text",
     "AssInfo",
     "AssStyle",
     "render_preview",
+    "render_rounded_overlay",
     "render_rounded_video",
     "RoundedBgStyle",
     "get_subtitle_style",

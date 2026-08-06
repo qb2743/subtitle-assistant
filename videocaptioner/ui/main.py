@@ -30,6 +30,12 @@ def _configure_qt_plugin_path() -> None:
             continue
         os.environ["QT_PLUGIN_PATH"] = str(plugin_root)
         os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms)
+        wmf_engine = plugin_root / "mediaservice" / "wmfengine.dll"
+        if platform.system() == "Windows" and wmf_engine.is_file():
+            # DirectShow cannot feed common H.264 MP4 frames to the preview surface.
+            os.environ.setdefault(
+                "QT_MULTIMEDIA_PREFERRED_PLUGINS", "windowsmediafoundation"
+            )
         return
 
 

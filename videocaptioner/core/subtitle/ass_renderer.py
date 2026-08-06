@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
-from PIL import Image
+from PIL import Image, ImageMath
 
 from videocaptioner.config import CACHE_PATH, FONTS_PATH, RESOURCE_PATH
 from videocaptioner.core.entities import SubtitleLayoutEnum
@@ -32,6 +32,93 @@ PlayResY: {video_height}
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 {dialogue}
 """
+
+
+def _prepare_preview_ass(
+    style_str: str,
+    preview_text: Tuple[str, Optional[str]],
+    width: int,
+    height: int,
+    reference_height: int,
+) -> Tuple[str, str]:
+    original_text, translate_text = preview_text
+    if translate_text:
+        dialogue = [
+            f"Dialogue: 0,0:00:00.00,0:00:01.00,Secondary,,0,0,0,,{translate_text}",
+            f"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{original_text}",
+        ]
+    else:
+        dialogue = [
+            f"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{original_text}"
+        ]
+
+    scaled_style = _scale_ass_style(style_str, height / reference_height)
+    ass_content = ASS_TEMPLATE.format(
+        style_str=scaled_style,
+        dialogue=os.linesep.join(dialogue),
+        video_width=width,
+        video_height=height,
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ass", delete=False, encoding="utf-8"
+    ) as temp_file:
+        temp_file.write(ass_content)
+        temp_ass_path = temp_file.name
+
+    try:
+        return temp_ass_path, auto_wrap_ass_file(temp_ass_path)
+    except Exception:
+        Path(temp_ass_path).unlink(missing_ok=True)
+        raise
+
+
+def _cleanup_preview_ass(temp_ass_path: str, processed_ass: str) -> None:
+    Path(temp_ass_path).unlink(missing_ok=True)
+    if processed_ass != temp_ass_path:
+        Path(processed_ass).unlink(missing_ok=True)
+
+
+def _escape_ffmpeg_filter_path(path: str) -> str:
+    return path.replace("\\", "/").replace(":", r"\:").replace("'", r"'\''")
+
+
+def _convert_ass_overlay_to_straight_alpha(output_path: Path) -> None:
+    """Convert libass TV-range premultiplied pixels for Qt's straight-alpha blend."""
+    with Image.open(output_path) as source:
+        rgba = source.convert("RGBA")
+    red, green, blue, alpha = rgba.split()
+
+    def convert_channel(channel: Image.Image) -> Image.Image:
+        return ImageMath.lambda_eval(
+            lambda args: args["convert"](
+                args["min"](
+                    args["max"](
+                        (
+                            (args["channel"] * 255 / args["max"](args["alpha"], 1))
+                            - 16
+                        )
+                        * 255
+                        / 219,
+                        0,
+                    ),
+                    255,
+                ),
+                "L",
+            ),
+            channel=channel,
+            alpha=alpha,
+        )
+
+    straight = Image.merge(
+        "RGBA",
+        (
+            convert_channel(red),
+            convert_channel(green),
+            convert_channel(blue),
+            alpha,
+        ),
+    )
+    straight.save(output_path, "PNG")
 
 
 def _check_cuda_available() -> bool:
@@ -108,51 +195,15 @@ def render_ass_preview(
             width = width or 1920
             height = height or 1080
 
-    original_text, translate_text = preview_text
-
-    # 构建对话行
-    if translate_text:
-        dialogue = [
-            f"Dialogue: 0,0:00:00.00,0:00:01.00,Secondary,,0,0,0,,{translate_text}",
-            f"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{original_text}",
-        ]
-    else:
-        dialogue = [
-            f"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{original_text}"
-        ]
-
-    # 生成 ASS 内容
-    ass_content = ASS_TEMPLATE.format(
-        style_str=style_str,
-        dialogue=os.linesep.join(dialogue),
-        video_width=width,
-        video_height=height,
+    temp_ass_path, processed_ass = _prepare_preview_ass(
+        style_str,
+        preview_text,
+        width,
+        height,
+        reference_height,
     )
-
-    # 从 ASS 内容中提取参考高度，根据图片高度自动缩放样式
-    scale_factor = height / reference_height
-    style_str = _scale_ass_style(style_str, scale_factor)
-
-    # 重新生成缩放后的 ASS 内容
-    ass_content = ASS_TEMPLATE.format(
-        style_str=style_str,
-        dialogue=os.linesep.join(dialogue),
-        video_width=width,
-        video_height=height,
-    )
-
-    # 创建临时 ASS 文件
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".ass", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(ass_content)
-        temp_ass_path = f.name
-
-    processed_ass = temp_ass_path
+    output_path: Optional[Path] = None
     try:
-        # 自动换行处理
-        processed_ass = auto_wrap_ass_file(temp_ass_path)
-
         # 确保背景图片存在
         bg_path_obj = Path(bg_image_path)
         if not bg_path_obj.exists():
@@ -186,10 +237,10 @@ def render_ass_preview(
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 处理 ASS 文件路径（Windows 兼容）
-        ass_file_escaped = processed_ass.replace("\\", "/").replace(":", r"\:")
+        ass_file_escaped = _escape_ffmpeg_filter_path(processed_ass)
 
         # 添加内置字体目录支持
-        fonts_dir_escaped = str(FONTS_PATH).replace("\\", "/").replace(":", r"\:")
+        fonts_dir_escaped = _escape_ffmpeg_filter_path(str(FONTS_PATH))
 
         canvas_filter = build_canvas_filter((width, height))
         cmd = [
@@ -218,10 +269,76 @@ def render_ass_preview(
         return str(output_path)
 
     finally:
-        # 清理临时文件
-        Path(temp_ass_path).unlink(missing_ok=True)
-        if processed_ass != temp_ass_path:
-            Path(processed_ass).unlink(missing_ok=True)
+        _cleanup_preview_ass(temp_ass_path, processed_ass)
+
+
+def render_ass_overlay(
+    style_str: str,
+    preview_text: Tuple[str, Optional[str]],
+    width: int,
+    height: int,
+    reference_height: int = 720,
+) -> str:
+    """Render an ASS preview as a transparent RGBA image."""
+    width, height = max(1, int(width)), max(1, int(height))
+    temp_ass_path, processed_ass = _prepare_preview_ass(
+        style_str,
+        preview_text,
+        width,
+        height,
+        reference_height,
+    )
+    output_path: Optional[Path] = None
+    try:
+        CACHE_PATH.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".png", dir=CACHE_PATH, delete=False
+        ) as output_file:
+            output_path = Path(output_file.name)
+
+        ass_file_escaped = _escape_ffmpeg_filter_path(processed_ass)
+        fonts_dir_escaped = _escape_ffmpeg_filter_path(str(FONTS_PATH))
+        subtitle_filter = (
+            f"ass='{ass_file_escaped}':fontsdir='{fonts_dir_escaped}':alpha=1,"
+            "format=rgba"
+        )
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black@0.0:s={width}x{height},format=rgba",
+            "-vf",
+            subtitle_filter,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            "-pix_fmt",
+            "rgba",
+            str(output_path),
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=30,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
+        )
+        if result.returncode != 0:
+            output_path.unlink(missing_ok=True)
+            error = (result.stderr or b"").decode("utf-8", errors="replace")
+            raise RuntimeError(f"FFmpeg ASS overlay generation failed: {error}")
+        _convert_ass_overlay_to_straight_alpha(output_path)
+        return str(output_path)
+    except Exception:
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        _cleanup_preview_ass(temp_ass_path, processed_ass)
 
 
 def _get_video_resolution(video_path: str) -> Tuple[int, int]:
@@ -301,7 +418,7 @@ def render_ass_video(
         processed_subtitle = auto_wrap_ass_file(temp_ass_path)
 
         # 转义字幕路径
-        subtitle_path_escaped = Path(processed_subtitle).as_posix().replace(":", r"\:")
+        subtitle_path_escaped = _escape_ffmpeg_filter_path(processed_subtitle)
 
         # 构建 FFmpeg Command
         vcodec = "libx264"
@@ -310,7 +427,7 @@ def render_ass_video(
             logger.debug("WebM format, using libvpx-vp9")
 
         # 添加内置字体目录支持
-        fonts_dir_escaped = FONTS_PATH.as_posix().replace(":", r"\:")
+        fonts_dir_escaped = _escape_ffmpeg_filter_path(str(FONTS_PATH))
 
         # 统一使用 ass 滤镜
         vf = f"ass='{subtitle_path_escaped}':fontsdir='{fonts_dir_escaped}'"

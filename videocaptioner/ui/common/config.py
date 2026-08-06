@@ -383,6 +383,7 @@ class Config(QConfig):
         EnumSerializer(SubtitleLayoutEnum),
     )
     subtitle_preview_image = ConfigItem("SubtitleStyle", "PreviewImage", "")
+    subtitle_preview_video = ConfigItem("SubtitleStyle", "PreviewVideo", "")
 
     # 字幕渲染模式
     subtitle_render_mode = OptionsConfigItem(

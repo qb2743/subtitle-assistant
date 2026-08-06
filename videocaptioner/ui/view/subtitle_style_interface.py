@@ -2,14 +2,20 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
-from PyQt5.QtCore import QPoint, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QPoint, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontDatabase
-from PyQt5.QtWidgets import QAction, QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QAction,
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
     ComboBox,
-    ImageLabel,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -28,8 +34,8 @@ from videocaptioner.core.subtitle import (
     font_supports_text,
     get_font_ass_attributes,
     get_font_variants,
-    render_ass_preview,
-    render_preview,
+    render_ass_overlay,
+    render_rounded_overlay,
 )
 from videocaptioner.core.subtitle.style_manager import StyleMode
 from videocaptioner.core.subtitle.styles import RoundedBgStyle
@@ -42,6 +48,10 @@ from videocaptioner.ui.components.MySettingCard import (
     ComboBoxSettingCard,
     DoubleSpinBoxSettingCard,
     SpinBoxSettingCard,
+)
+from videocaptioner.ui.components.SubtitleVideoPreview import (
+    VIDEO_PREVIEW_SUFFIXES,
+    SubtitleVideoPreview,
 )
 
 PERVIEW_TEXTS = {
@@ -120,49 +130,63 @@ DEFAULT_BG_PORTRAIT = {
 }
 
 
-class AssPreviewThread(QThread):
-    """ASS 样式预览线程"""
+def select_preview_top_height(
+    configured_canvas: Optional[Tuple[int, int]],
+    player_canvas: Tuple[int, int],
+) -> int:
+    """Return the minimum preview height for the effective orientation."""
+    width, height = configured_canvas or player_canvas
+    return 420 if height > width else 390
 
-    previewReady = pyqtSignal(str)
+
+class AssPreviewThread(QThread):
+    """ASS transparent overlay render thread."""
+
+    previewReady = pyqtSignal(int, str)
+    previewFailed = pyqtSignal(int, str)
 
     def __init__(
         self,
         preview_text: Tuple[str, Optional[str]],
         style_str: str,
-        bg_image_path: str,
-        width: Optional[int] = None,
-        height: Optional[int] = None,
+        width: int,
+        height: int,
+        generation: int,
     ):
         super().__init__()
         self.preview_text = preview_text
         self.width = width
         self.height = height
         self.style_str = style_str
-        self.bg_image_path = bg_image_path
+        self.generation = generation
+        self.output_path = ""
 
     def run(self):
-        preview_path = render_ass_preview(
-            style_str=self.style_str,
-            preview_text=self.preview_text,
-            bg_image_path=self.bg_image_path,
-            width=self.width,
-            height=self.height,
-        )
-        self.previewReady.emit(preview_path)
+        try:
+            self.output_path = render_ass_overlay(
+                style_str=self.style_str,
+                preview_text=self.preview_text,
+                width=self.width,
+                height=self.height,
+            )
+            self.previewReady.emit(self.generation, self.output_path)
+        except Exception as exc:
+            self.previewFailed.emit(self.generation, str(exc))
 
 
 class RoundedBgPreviewThread(QThread):
-    """圆角背景预览线程"""
+    """Rounded-background transparent overlay render thread."""
 
-    previewReady = pyqtSignal(str)
+    previewReady = pyqtSignal(int, str)
+    previewFailed = pyqtSignal(int, str)
 
     def __init__(
         self,
         style: RoundedBgStyle,
         preview_text: Tuple[str, Optional[str]],
-        width: Optional[int] = None,
-        height: Optional[int] = None,
-        bg_image_path: Optional[str] = None,
+        width: int,
+        height: int,
+        generation: int,
     ):
         super().__init__()
         self.primary_text = preview_text[0]
@@ -170,18 +194,21 @@ class RoundedBgPreviewThread(QThread):
         self.width = width
         self.height = height
         self.style = style
-        self.bg_image_path = bg_image_path
+        self.generation = generation
+        self.output_path = ""
 
     def run(self):
-        preview_path = render_preview(
-            primary_text=self.primary_text,
-            secondary_text=self.secondary_text,
-            width=self.width,
-            height=self.height,
-            style=self.style,
-            bg_image_path=self.bg_image_path,
-        )
-        self.previewReady.emit(preview_path)
+        try:
+            self.output_path = render_rounded_overlay(
+                primary_text=self.primary_text,
+                secondary_text=self.secondary_text,
+                width=self.width,
+                height=self.height,
+                style=self.style,
+            )
+            self.previewReady.emit(self.generation, self.output_path)
+        except Exception as exc:
+            self.previewFailed.emit(self.generation, str(exc))
 
 
 class SubtitleStyleInterface(QWidget):
@@ -201,6 +228,18 @@ class SubtitleStyleInterface(QWidget):
         self._initLayout()
         self._initStyle()
 
+        self._preview_generation = 0
+        self._preview_threads = []
+        self._preview_pending = False
+        self._shutting_down = False
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(120)
+        self._preview_timer.timeout.connect(self._renderPreview)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdownPreviewThreads)
+
         # 控制是否触发样式变更回调（加载样式时禁用）
         self._loading_style = False
 
@@ -213,7 +252,7 @@ class SubtitleStyleInterface(QWidget):
     def _initSettingsArea(self):
         """初始化左侧设置区域"""
         self.settingsScrollArea = ScrollArea()
-        self.settingsScrollArea.setFixedWidth(350)
+        self.settingsScrollArea.setMinimumWidth(440)
         self.settingsWidget = QWidget()
         self.settingsLayout = QVBoxLayout(self.settingsWidget)
         self.settingsScrollArea.setWidget(self.settingsWidget)
@@ -246,14 +285,11 @@ class SubtitleStyleInterface(QWidget):
 
         # 顶部预览区域
         self.previewTopWidget = QWidget()
-        self.previewTopWidget.setFixedHeight(430)
         self.previewTopLayout = QVBoxLayout(self.previewTopWidget)
 
-        self.previewLabel = BodyLabel(self.tr("预览效果"))
-        self.previewImage = ImageLabel()
-        self.previewImage.setAlignment(Qt.AlignCenter)  # type: ignore
-        self.previewTopLayout.addWidget(self.previewImage, 0, Qt.AlignCenter)  # type: ignore
-        self.previewTopLayout.setAlignment(Qt.AlignVCenter)  # type: ignore
+        self.previewPlayer = SubtitleVideoPreview(self.previewTopWidget)
+        self.previewTopLayout.addWidget(self.previewPlayer)
+        self._updatePreviewTopHeight()
 
         # 底部控件区域
         self.previewBottomWidget = QWidget()
@@ -284,9 +320,9 @@ class SubtitleStyleInterface(QWidget):
         self.previewBottomLayout.addWidget(self.newStyleButton)
         self.previewBottomLayout.addWidget(self.openStyleFolderButton)
 
-        self.previewLayout.addWidget(self.previewTopWidget)
+        self.previewCard.setMinimumWidth(480)
+        self.previewLayout.addWidget(self.previewTopWidget, 1)
         self.previewLayout.addWidget(self.previewBottomWidget)
-        self.previewLayout.addStretch(1)
 
     def _initSettingCards(self):
         """初始化所有设置卡片"""
@@ -527,10 +563,10 @@ class SubtitleStyleInterface(QWidget):
         )
 
         self.previewImageCard = PushSettingCard(
-            self.tr("选择图片"),
-            FIF.PHOTO,
-            self.tr("预览背景"),
-            self.tr("选择预览使用的背景图片"),
+            self.tr("选择媒体"),
+            FIF.VIDEO,
+            self.tr("预览媒体"),
+            self.tr("选择预览使用的视频或背景图片"),
             parent=self.previewGroup,
         )
 
@@ -585,8 +621,8 @@ class SubtitleStyleInterface(QWidget):
         self.settingsLayout.addStretch(1)
 
         # 添加左右两侧到主布局
-        self.hBoxLayout.addWidget(self.settingsScrollArea)
-        self.hBoxLayout.addWidget(self.previewCard)
+        self.hBoxLayout.addWidget(self.settingsScrollArea, 1)
+        self.hBoxLayout.addWidget(self.previewCard, 1)
 
     def _initStyle(self):
         """初始化样式"""
@@ -830,6 +866,8 @@ class SubtitleStyleInterface(QWidget):
         self.previewTextCard.currentTextChanged.connect(self.updatePreview)
         self.orientationCard.currentTextChanged.connect(self.onOrientationChanged)
         self.previewImageCard.clicked.connect(self.selectPreviewImage)
+        self.previewPlayer.canvasSizeChanged.connect(self._onPreviewCanvasSizeChanged)
+        cfg.dubbing_canvas.valueChanged.connect(self._onDubbingCanvasChanged)
 
         # 连接样式切换信号
         self.styleNameComboBox.currentTextChanged.connect(self.loadStyle)
@@ -1014,6 +1052,23 @@ class SubtitleStyleInterface(QWidget):
             cfg.set(cfg.subtitle_preview_image, str(Path(preview_image["path"])))
         self.updatePreview()
 
+    def _updatePreviewTopHeight(
+        self, player_canvas: Optional[Tuple[int, int]] = None
+    ) -> None:
+        configured_canvas = _normalise_canvas(cfg.dubbing_canvas.value)
+        player_canvas = player_canvas or self.previewPlayer.canvasSize()
+        self.previewTopWidget.setMinimumHeight(
+            select_preview_top_height(configured_canvas, player_canvas)
+        )
+
+    def _onPreviewCanvasSizeChanged(self, width: int, height: int) -> None:
+        self._updatePreviewTopHeight((width, height))
+        self.updatePreview()
+
+    def _onDubbingCanvasChanged(self, _canvas: str) -> None:
+        self._updatePreviewTopHeight()
+        self.updatePreview()
+
     def onAssSettingChanged(self):
         """ASS 样式设置变更"""
         if self._loading_style:
@@ -1027,15 +1082,22 @@ class SubtitleStyleInterface(QWidget):
             self.saveStyle("default")
 
     def selectPreviewImage(self):
-        """选择预览背景图片"""
+        """Select a video or image for the style preview."""
+        video_patterns = " ".join(
+            f"*{suffix}" for suffix in sorted(VIDEO_PREVIEW_SUFFIXES)
+        )
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            self.tr("选择背景图片"),
+            self.tr("选择预览媒体"),
             "",
-            self.tr("图片文件") + " (*.png *.jpg *.jpeg)",
+            f"{self.tr('媒体文件')} ({video_patterns} *.png *.jpg *.jpeg)",
         )
         if file_path:
-            cfg.set(cfg.subtitle_preview_image, file_path)
+            if Path(file_path).suffix.lower() in VIDEO_PREVIEW_SUFFIXES:
+                cfg.set(cfg.subtitle_preview_video, file_path)
+            else:
+                cfg.set(cfg.subtitle_preview_image, file_path)
+                cfg.set(cfg.subtitle_preview_video, "")
             self.updatePreview()
 
     def generateAssStyles(self) -> str:
@@ -1083,7 +1145,29 @@ class SubtitleStyleInterface(QWidget):
         return f"[V4+ Styles]\n{style_format}\n{primary_style}\n{secondary_style}"
 
     def updatePreview(self):
-        """更新预览图片"""
+        """Schedule a subtitle layer refresh while preserving playback."""
+        if self._shutting_down:
+            return
+        self._preview_generation += 1
+        self._preview_timer.start(120)
+
+    def setPreviewVideo(self, video_path: str) -> None:
+        """Use the selected workflow video as the style preview source."""
+        cfg.set(
+            cfg.subtitle_preview_video,
+            video_path if Path(video_path).is_file() else "",
+        )
+        self.updatePreview()
+
+    def _renderPreview(self):
+        """Render the current subtitle style as a transparent overlay."""
+        if self._shutting_down:
+            return
+        if any(thread.isRunning() for thread in self._preview_threads):
+            self._preview_pending = True
+            return
+        self._preview_pending = False
+
         # 获取预览文本
         english_text, chinese_text = PERVIEW_TEXTS[
             self.previewTextCard.comboBox.currentText()
@@ -1134,7 +1218,17 @@ class SubtitleStyleInterface(QWidget):
             path = default_preview["path"]
 
         canvas_size = _normalise_canvas(cfg.dubbing_canvas.value)
-        preview_width, preview_height = canvas_size or (None, None)
+        video_path = cfg.get(cfg.subtitle_preview_video)
+        if Path(video_path).suffix.lower() not in VIDEO_PREVIEW_SUFFIXES:
+            video_path = ""
+        self.previewPlayer.setSource(
+            video_path=video_path,
+            poster_path=str(path),
+            canvas_size=canvas_size,
+        )
+        preview_width, preview_height = self.previewPlayer.canvasSize()
+        self._updatePreviewTopHeight((preview_width, preview_height))
+        generation = self._preview_generation
 
         # 统一画布开启时，预览和最终压制使用相同的尺寸与样式缩放基准。
         if render_mode == SubtitleRenderModeEnum.ROUNDED_BG:
@@ -1160,7 +1254,7 @@ class SubtitleStyleInterface(QWidget):
                 style=style,
                 width=preview_width,
                 height=preview_height,
-                bg_image_path=str(path),
+                generation=generation,
             )
         else:
             # ASS 样式模式（样式720P基准，由渲染层自动缩放）
@@ -1170,25 +1264,66 @@ class SubtitleStyleInterface(QWidget):
                 style_str=style_str,
                 width=preview_width,
                 height=preview_height,
-                bg_image_path=str(path),
+                generation=generation,
             )
 
-        self.preview_thread.previewReady.connect(self.onPreviewReady)
-        self.preview_thread.start()
+        thread = self.preview_thread
+        self._preview_threads.append(thread)
+        thread.previewReady.connect(self.onPreviewReady)
+        thread.previewFailed.connect(self.onPreviewFailed)
+        thread.finished.connect(lambda: self._releasePreviewThread(thread))
+        thread.start()
 
-    def onPreviewReady(self, preview_path):
-        """预览图片生成完成的回调"""
-        self.previewImage.setImage(preview_path)
-        self.updatePreviewImage()
+    def _releasePreviewThread(self, thread: QThread) -> None:
+        needs_refresh = (
+            self._preview_pending or thread.generation != self._preview_generation
+        )
+        if thread in self._preview_threads:
+            self._preview_threads.remove(thread)
+        output_path = getattr(thread, "output_path", "")
+        if output_path:
+            Path(output_path).unlink(missing_ok=True)
+        thread.deleteLater()
+        if needs_refresh and not self._shutting_down:
+            self._preview_pending = False
+            self._preview_timer.start(0)
+
+    def _shutdownPreviewThreads(self) -> None:
+        self._shutting_down = True
+        self._preview_timer.stop()
+        self._preview_generation += 1
+        for thread in tuple(self._preview_threads):
+            if thread.isRunning():
+                thread.wait()
+            output_path = getattr(thread, "output_path", "")
+            if output_path:
+                Path(output_path).unlink(missing_ok=True)
+
+    def onPreviewReady(self, generation: int, preview_path: str):
+        """Apply only the newest completed subtitle overlay."""
+        try:
+            if generation == self._preview_generation:
+                self.previewPlayer.setSubtitleOverlay(preview_path)
+        finally:
+            Path(preview_path).unlink(missing_ok=True)
+
+    def onPreviewFailed(self, generation: int, error: str) -> None:
+        if generation != self._preview_generation:
+            return
+        self.previewPlayer.clearSubtitleOverlay()
+        InfoBar.warning(
+            title=self.tr("预览生成失败"),
+            content=error,
+            orient=Qt.Horizontal,  # type: ignore
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=INFOBAR_DURATION_WARNING,
+            parent=self,
+        )
 
     def updatePreviewImage(self):
-        """更新预览图片"""
-        height = int(self.previewTopWidget.height() * 0.98)
-        width = int(self.previewTopWidget.width() * 0.98)
-        self.previewImage.scaledToWidth(width)
-        if self.previewImage.height() > height:
-            self.previewImage.scaledToHeight(height)
-        self.previewImage.setBorderRadius(8, 8, 8, 8)
+        """Keep compatibility with callers that request a preview refit."""
+        self.previewPlayer.fitView()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1197,7 +1332,13 @@ class SubtitleStyleInterface(QWidget):
     def showEvent(self, event):
         """窗口显示事件"""
         super().showEvent(event)
+        self._shutting_down = False
         self.updatePreviewImage()
+        self.updatePreview()
+
+    def closeEvent(self, event):
+        self._shutdownPreviewThreads()
+        super().closeEvent(event)
 
     def _resolve_style_path(self, style_name: str) -> Path:
         """Resolve style name to file path, trying prefixed names."""
@@ -1402,37 +1543,44 @@ class SubtitleStyleInterface(QWidget):
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def dragEnterEvent(self, event):
-        """拖入事件：检查是否为图片文件"""
+        """Accept supported preview videos and images."""
         if event.mimeData().hasUrls():
-            # 检查是否有图片文件
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
-                if file_path.lower().endswith((".png", ".jpg", ".jpeg")):
+                suffix = Path(file_path).suffix.lower()
+                if suffix in VIDEO_PREVIEW_SUFFIXES or suffix in {
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                }:
                     event.accept()
                     return
         event.ignore()
 
     def dropEvent(self, event):
-        """放下事件：将图片设置为预览背景"""
+        """Use the first supported dropped file as preview media."""
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         for file_path in files:
-            # 检查是否为图片文件
-            if file_path.lower().endswith((".png", ".jpg", ".jpeg")):
-                # 设置为预览背景
+            suffix = Path(file_path).suffix.lower()
+            if suffix in VIDEO_PREVIEW_SUFFIXES:
+                cfg.set(cfg.subtitle_preview_video, file_path)
+            elif suffix in {".png", ".jpg", ".jpeg"}:
                 cfg.set(cfg.subtitle_preview_image, file_path)
-                # 更新预览
-                self.updatePreview()
-                # 显示成功提示
-                InfoBar.success(
-                    title=self.tr("成功"),
-                    content=self.tr("已设置预览背景：") + Path(file_path).name,
-                    orient=Qt.Horizontal,  # type: ignore
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=INFOBAR_DURATION_SUCCESS,
-                    parent=self,
-                )
-                break  # 只处理第一个图片文件
+                cfg.set(cfg.subtitle_preview_video, "")
+            else:
+                continue
+
+            self.updatePreview()
+            InfoBar.success(
+                title=self.tr("成功"),
+                content=self.tr("已设置预览媒体：") + Path(file_path).name,
+                orient=Qt.Horizontal,  # type: ignore
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+            break
 
 
 class StyleNameDialog(MessageBoxBase):

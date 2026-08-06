@@ -3,7 +3,7 @@
 ; Install Inno Setup 6 from https://jrsoftware.org/isinfo.php
 
 #define MyAppName "字幕助手"
-#define MyAppVersion "1.1.7"
+#define MyAppVersion "1.1.8"
 #define MyAppPublisher "qb2743"
 #define MyAppURL "https://github.com/qb2743/subtitle-assistant"
 #define MyAppExeName "字幕助手.exe"
@@ -28,7 +28,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"

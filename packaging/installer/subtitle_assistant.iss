@@ -3,7 +3,7 @@
 ; Install Inno Setup 6 from https://jrsoftware.org/isinfo.php
 
 #define MyAppName "字幕助手"
-#define MyAppVersion "1.1.6"
+#define MyAppVersion "1.1.7"
 #define MyAppPublisher "qb2743"
 #define MyAppURL "https://github.com/qb2743/subtitle-assistant"
 #define MyAppExeName "字幕助手.exe"

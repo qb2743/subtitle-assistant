@@ -421,7 +421,7 @@ class SettingInterface(ScrollArea):
                 config["model_cfg"],
                 FIF.ROBOT,  # type: ignore
                 self.tr("模型"),
-                self.tr(f"选择 {service.value} 模型"),
+                self.tr("选择主模型；用英文逗号追加备用模型，失败时自动切换"),
                 config["default_models"],
                 self.llmGroup,
             )
@@ -783,6 +783,7 @@ class SettingInterface(ScrollArea):
         # 禁用检查按钮，显示加载状态
         self.checkLLMConnectionCard.button.setEnabled(False)
         self.checkLLMConnectionCard.button.setText(self.tr("正在检查..."))
+        self.llmServiceCard.setEnabled(False)
 
         # 立即恢复滚动位置（防止按钮状态改变导致的自动滚动）
         self.verticalScrollBar().setValue(scroll_position)
@@ -797,6 +798,7 @@ class SettingInterface(ScrollArea):
         """处理连接检查错误事件"""
         self.checkLLMConnectionCard.button.setEnabled(True)
         self.checkLLMConnectionCard.button.setText(self.tr("检查连接"))
+        self.llmServiceCard.setEnabled(True)
         InfoBar.error(
             self.tr("LLM 连接测试错误"),
             message,
@@ -808,6 +810,7 @@ class SettingInterface(ScrollArea):
         """处理连接检查完成事件"""
         self.checkLLMConnectionCard.button.setEnabled(True)
         self.checkLLMConnectionCard.button.setText(self.tr("检查连接"))
+        self.llmServiceCard.setEnabled(True)
 
         # 获取当前服务
         current_service = LLMServiceEnum(self.llmServiceCard.comboBox.currentText())
@@ -818,7 +821,7 @@ class SettingInterface(ScrollArea):
             if service_config and service_config["model"]:
                 temp = service_config["model"].comboBox.currentText()
                 service_config["model"].setItems(models)
-                service_config["model"].comboBox.setCurrentText(temp)
+                service_config["model"].setValue(temp)
 
             InfoBar.success(
                 self.tr("获取模型列表成功:"),

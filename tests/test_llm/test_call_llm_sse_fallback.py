@@ -5,16 +5,13 @@ call_llm 能从原始响应数据中提取 SSE 内容并返回伪 ChatCompletion
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from videocaptioner.core.llm.response_utils import (
     extract_content_from_response,
-    parse_sse_string,
     make_pseudo_completion,
 )
-
 
 SSE_RESPONSE_WITH_CONTENT = """\
 : heartbeat
@@ -67,15 +64,7 @@ def test_make_pseudo_completion_has_correct_shape():
 
 def test_call_llm_sse_fallback(monkeypatch):
     """call_llm 在标准解析失败时应通过 SSE fallback 提取内容。"""
-    # 禁用缓存
-    monkeypatch.setattr(
-        "videocaptioner.core.llm.client.get_llm_cache",
-        lambda: None,
-    )
-    # 重新 import 以使缓存 mock 生效
-    import importlib
     import videocaptioner.core.llm.client as client_mod
-    importlib.reload(client_mod)
 
     fake_response = FakeEmptyResponse(SSE_RESPONSE_WITH_CONTENT)
     monkeypatch.setattr(
@@ -83,7 +72,7 @@ def test_call_llm_sse_fallback(monkeypatch):
         lambda *args, **kwargs: fake_response,
     )
 
-    response = client_mod.call_llm(
+    response = client_mod.call_llm.__wrapped__(
         messages=[{"role": "user", "content": "hi"}],
         model="grok-4.3-fast",
     )
@@ -92,9 +81,7 @@ def test_call_llm_sse_fallback(monkeypatch):
 
 def test_call_llm_real_empty_response_raises(monkeypatch):
     """真正空响应（无 SSE 数据）应抛 ValueError。"""
-    import importlib
     import videocaptioner.core.llm.client as client_mod
-    importlib.reload(client_mod)
 
     monkeypatch.setattr(
         client_mod, "_call_llm_api",
@@ -102,7 +89,41 @@ def test_call_llm_real_empty_response_raises(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="empty choices or content"):
-        client_mod.call_llm(
+        client_mod.call_llm.__wrapped__(
             messages=[{"role": "user", "content": "hi"}],
             model="fake",
         )
+
+
+def test_runtime_call_switches_to_backup_model(monkeypatch):
+    import videocaptioner.core.llm.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_preferred_models", {})
+    attempts = []
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+    )
+
+    class FailoverCompletions:
+        def create(self, **kwargs):
+            attempts.append(kwargs["model"])
+            if kwargs["model"] == "primary":
+                raise RuntimeError("primary unavailable")
+            return response
+
+    client = SimpleNamespace(
+        base_url="http://fake/v1/",
+        api_key="sk-fake",
+        chat=SimpleNamespace(completions=FailoverCompletions())
+    )
+    monkeypatch.setattr(client_mod, "get_llm_client", lambda: client)
+
+    result = client_mod._call_llm_api(
+        messages=[{"role": "user", "content": "hi"}],
+        model="primary, backup",
+    )
+
+    assert result is response
+    assert attempts == ["primary", "backup"]
+    scope = client_mod.model_fallback_scope("http://fake/v1", "sk-fake")
+    assert (scope, "primary", "backup") in client_mod._preferred_models

@@ -5,6 +5,11 @@ from typing import Iterable
 
 from openai import OpenAI
 
+from videocaptioner.core.llm.client import (
+    call_with_model_fallback,
+    model_fallback_scope,
+    resolve_llm_base_url,
+)
 from videocaptioner.core.llm.request_logger import create_http_client
 from videocaptioner.core.utils.text_utils import is_mainly_cjk
 
@@ -35,9 +40,10 @@ def rewrite_segments_if_needed(segments: Iterable[DubbingSegment], config: Dubbi
     if not targets:
         return
 
+    llm_base_url = resolve_llm_base_url(config.llm_api_base)
     client = OpenAI(
         api_key=config.llm_api_key,
-        base_url=config.llm_api_base,
+        base_url=llm_base_url,
         http_client=create_http_client(),
     )
     payload = [
@@ -67,14 +73,26 @@ def rewrite_segments_if_needed(segments: Iterable[DubbingSegment], config: Dubbi
             ),
         },
     ]
-    response = client.chat.completions.create(
-        model=config.llm_model,
-        messages=messages,  # type: ignore[arg-type]
-        temperature=0.2,
-        response_format={"type": "json_object"},
+    def request(candidate: str) -> dict:
+        response = client.chat.completions.create(
+            model=candidate,
+            messages=messages,  # type: ignore[arg-type]
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("LLM returned an empty rewrite response")
+        result = json.loads(content)
+        if not isinstance(result, dict):
+            raise ValueError("LLM rewrite response must be a JSON object")
+        return result
+
+    result, _ = call_with_model_fallback(
+        config.llm_model,
+        request,
+        scope=model_fallback_scope(llm_base_url, config.llm_api_key),
     )
-    content = response.choices[0].message.content or "{}"
-    result = json.loads(content)
     rewritten = {
         int(item["index"]): str(item["text"]).strip()
         for item in result.get("items", [])

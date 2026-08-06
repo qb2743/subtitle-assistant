@@ -90,6 +90,78 @@ def test_check_llm_connection_has_bounded_timeout_and_retries(monkeypatch):
     assert captured["http_timeout"] == 10
 
 
+def test_check_llm_connection_switches_to_backup_and_remembers_it(monkeypatch):
+    import videocaptioner.core.llm.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_preferred_models", {})
+    attempts = []
+
+    class FailoverCompletions:
+        def create(self, **kwargs):
+            attempts.append(kwargs["model"])
+            if kwargs["model"] == "primary":
+                raise RuntimeError("primary unavailable")
+            return FakeChatCompletion("Hello")
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FailoverCompletions())
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.llm.check_llm.openai.OpenAI",
+        lambda *args, **kwargs: client,
+    )
+
+    ok, message = check_llm_connection(
+        "http://fake/v1", "sk-fake", "primary, backup, primary"
+    )
+
+    assert ok is True
+    assert attempts == ["primary", "backup"]
+    assert "已自动切换到备用模型 backup" in message
+
+    attempts.clear()
+    ok, _ = check_llm_connection(
+        "http://fake/v1", "sk-fake", "primary, backup"
+    )
+    assert ok is True
+    assert attempts == ["backup"]
+
+    attempts.clear()
+    ok, _ = check_llm_connection(
+        "http://fake/v1", "sk-other", "primary, backup"
+    )
+    assert ok is True
+    assert attempts == ["primary", "backup"]
+
+    attempts.clear()
+    ok, _ = check_llm_connection(
+        "http://other/v1", "sk-fake", "primary, backup"
+    )
+    assert ok is True
+    assert attempts == ["primary", "backup"]
+
+
+def test_model_fallback_preserves_rate_limit_for_retry(monkeypatch):
+    import videocaptioner.core.llm.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_preferred_models", {})
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+    )
+    rate_limit = openai.RateLimitError(
+        "rate limited", response=response, body={}
+    )
+
+    def request(candidate):
+        if candidate == "primary":
+            raise rate_limit
+        raise RuntimeError("backup unavailable")
+
+    with pytest.raises(openai.RateLimitError):
+        client_mod.call_with_model_fallback("primary, backup", request)
+
+
 def test_check_llm_connection_reports_cloudflare_521_concisely(monkeypatch):
     class FailingCompletions:
         def create(self, **kwargs):

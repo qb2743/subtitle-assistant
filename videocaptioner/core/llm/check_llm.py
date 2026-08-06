@@ -4,7 +4,12 @@ from typing import Literal, Optional
 
 import openai
 
-from videocaptioner.core.llm.client import normalize_base_url
+from videocaptioner.core.llm.client import (
+    call_with_model_fallback,
+    model_fallback_scope,
+    normalize_base_url,
+    parse_model_candidates,
+)
 from videocaptioner.core.llm.request_logger import create_http_client
 from videocaptioner.core.llm.response_utils import (
     extract_content_from_response,
@@ -48,21 +53,32 @@ def check_llm_connection(
     try:
         base_url = normalize_base_url(base_url)
         api_key = api_key.strip()
-        response = openai.OpenAI(
+        client = openai.OpenAI(
             base_url=base_url,
             api_key=api_key,
             timeout=10,
             max_retries=LLM_CHECK_MAX_RETRIES,
             http_client=create_http_client(timeout=10),
-        ).chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": 'Just respond with "Hello"!'},
-            ],
-            timeout=10,
         )
-        return True, _extract_response_content(response)
+
+        def request(candidate: str) -> str:
+            response = client.chat.completions.create(
+                model=candidate,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": 'Just respond with "Hello"!'},
+                ],
+                timeout=10,
+            )
+            return _extract_response_content(response)
+
+        message, active_model = call_with_model_fallback(
+            model, request, scope=model_fallback_scope(base_url, api_key)
+        )
+        primary_model = parse_model_candidates(model)[0]
+        if active_model != primary_model:
+            message = f"已自动切换到备用模型 {active_model}: {message}"
+        return True, message
     except openai.APIConnectionError:
         return False, "API Connection Error. Please check your network or VPN."
     except openai.RateLimitError as e:

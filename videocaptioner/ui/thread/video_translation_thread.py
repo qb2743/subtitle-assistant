@@ -54,6 +54,16 @@ def _organize_outputs(output_dir: Path, video: Path, translated_path: Path) -> P
     return final_subtitle
 
 
+def _write_dubbing_subtitle(path: Path, subtitle_data: dict) -> Path:
+    """Write only the translated/rewritten field used by TTS."""
+    if subtitle_data:
+        ASRData.from_json(subtitle_data).to_srt(
+            layout=SubtitleLayoutEnum.ONLY_TRANSLATE,
+            save_path=str(path),
+        )
+    return path
+
+
 def _narrator_review_path(source_subtitle: Path) -> Path:
     return source_subtitle.with_name(source_subtitle.stem + "-narrator-review.json")
 
@@ -112,7 +122,7 @@ class VideoTranslationThread(QThread):
     finished = pyqtSignal(str)
     narrator_review_required = pyqtSignal(object, object)
     narrator_review_saved = pyqtSignal(str)
-    translation_ready = pyqtSignal(str)
+    translation_ready = pyqtSignal(str, object)
 
     def __init__(
         self,
@@ -138,6 +148,7 @@ class VideoTranslationThread(QThread):
         self._narrator_event = threading.Event()
         self._translation_event = threading.Event()
         self._narrator_restore: list[int] = []
+        self._translation_data: dict = {}
         self._active_child = None
 
     def run(self):
@@ -204,18 +215,22 @@ class VideoTranslationThread(QThread):
                 if self.translation_review
                 else SubtitleLayoutEnum.ONLY_TRANSLATE
             )
+        subtitle_thread = SubtitleThread(subtitle_task)
         subtitle_result = self._run_child(
-            SubtitleThread(subtitle_task), 25, 35, f"字幕{action_label}"
+            subtitle_thread, 25, 35, f"字幕{action_label}"
         )
+        self._translation_data = subtitle_thread.result_data
         translated_path = Path(subtitle_result[1] if isinstance(subtitle_result, tuple) else subtitle_task.output_path)
         if not translated_path.exists():
             translated_path = Path(subtitle_task.output_path or source_subtitle)
 
         if self.translation_review:
-            self.translation_ready.emit(str(translated_path))
+            self.translation_ready.emit(str(translated_path), self._translation_data)
             self._wait_for_review(self._translation_event, f"{action_label}字幕")
             if self._cancelled:
                 return
+
+        _write_dubbing_subtitle(translated_path, self._translation_data)
 
         self.progress.emit(60, "开始字幕配音与画面对齐...")
         config = TaskFactory.create_dubbing_config()
@@ -384,7 +399,9 @@ class VideoTranslationThread(QThread):
         self._narrator_restore = list(restore_indices or [])
         self._narrator_event.set()
 
-    def continue_translation(self):
+    def continue_translation(self, subtitle_data: dict | None = None):
+        if subtitle_data is not None:
+            self._translation_data = subtitle_data
         self._translation_event.set()
 
     def cancel(self):

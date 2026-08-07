@@ -138,6 +138,7 @@ class SubtitleThread(QThread):
         self.optimizer = None
         self.splitter = None
         self.translator = None
+        self.result_data: dict = {}
         self._cancelled = False
 
     def set_custom_prompt_text(self, text: str):
@@ -280,6 +281,10 @@ class SubtitleThread(QThread):
                             layout=layout,
                         )
                         logger.info("%s字幕保存到：%s", action_label, save_path)
+
+            # Keep the structured original/translated fields available to
+            # workflows that must not round-trip same-language rewrites via SRT.
+            self.result_data = asr_data.to_json()
 
             # 5. 保存字幕
             asr_data.save(

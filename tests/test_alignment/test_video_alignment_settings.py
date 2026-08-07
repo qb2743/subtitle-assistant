@@ -6,6 +6,7 @@ import videocaptioner.ui.view.dubbing_interface as dubbing_module
 import videocaptioner.ui.view.home_interface as home_module
 import videocaptioner.ui.view.video_alignment_interface as alignment_module
 from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.dubbing.subtitle_parser import load_dubbing_segments
 from videocaptioner.core.entities import TranscribeLanguageEnum
 from videocaptioner.core.translate.types import TargetLanguage
 from videocaptioner.ui.thread.video_translation_thread import (
@@ -15,6 +16,7 @@ from videocaptioner.ui.thread.video_translation_thread import (
     _load_pending_narrator_restores,
     _organize_outputs,
     _save_narrator_review_artifacts,
+    _write_dubbing_subtitle,
 )
 
 
@@ -397,6 +399,55 @@ def test_video_translation_keeps_only_deliverables_in_output_root(tmp_path):
     ]
     assert (intermediate / adjusted.name).read_text(encoding="utf-8") == "adjusted"
     assert (intermediate / audio.name).read_bytes() == b"audio"
+
+
+def test_dubbing_subtitle_uses_only_same_language_rewrite(tmp_path):
+    subtitle = tmp_path / "rewrite.srt"
+    data = ASRData(
+        [
+            ASRDataSeg(
+                "When the boy was born",
+                0,
+                1200,
+                translated_text="The boy came into the world",
+            )
+        ]
+    ).to_json()
+
+    _write_dubbing_subtitle(subtitle, data)
+
+    content = subtitle.read_text(encoding="utf-8")
+    assert "The boy came into the world" in content
+    assert "When the boy was born" not in content
+    assert load_dubbing_segments(str(subtitle))[0].text == "The boy came into the world"
+
+
+def test_translation_review_passes_structured_edits_to_worker(tmp_path):
+    subtitle = tmp_path / "rewrite.srt"
+    data = ASRData(
+        [ASRDataSeg("Original", 0, 1000, translated_text="Edited rewrite")]
+    ).to_json()
+    continued = []
+    interface = SimpleNamespace(
+        subtitle_editor=SimpleNamespace(
+            model=SimpleNamespace(_data=data),
+            subtitle_path=str(subtitle),
+            setVisible=lambda _visible: None,
+        ),
+        editor_title=SimpleNamespace(setVisible=lambda _visible: None),
+        confirm_translation_btn=SimpleNamespace(setVisible=lambda _visible: None),
+        workflow_thread=SimpleNamespace(
+            continue_translation=lambda value: continued.append(value),
+            cancel=lambda: None,
+        ),
+        _on_error=lambda _message: None,
+    )
+
+    alignment_module.VideoAlignmentInterface._finish_translation_review(interface)
+
+    assert continued == [data]
+    assert "Edited rewrite" in subtitle.read_text(encoding="utf-8")
+    assert "Original" not in subtitle.read_text(encoding="utf-8")
 
 
 def test_narrator_review_artifacts_keep_actual_deleted_rows(tmp_path):

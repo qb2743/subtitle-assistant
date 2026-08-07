@@ -1189,13 +1189,16 @@ class VideoAlignmentInterface(QWidget):
         except Exception as exc:
             self._warn("读取删除记录失败", str(exc))
 
-    def _on_translation_ready(self, subtitle_path):
+    def _on_translation_ready(self, subtitle_path, subtitle_data=None):
         task = TaskFactory.create_subtitle_task(subtitle_path, self.video_input.file_path, need_next_task=True)
         task.subtitle_path = subtitle_path
         task.output_path = subtitle_path
         if self.workflow_thread and self.workflow_thread.subtitle_config:
             task.subtitle_config = self.workflow_thread.subtitle_config
         self.subtitle_editor.set_task(task)
+        if subtitle_data:
+            self.subtitle_editor.model._data = subtitle_data
+            self.subtitle_editor.model.layoutChanged.emit()
         self.editor_title.setVisible(True)
         self.subtitle_editor.setVisible(True)
         self.confirm_translation_btn.setEnabled(True)
@@ -1229,11 +1232,12 @@ class VideoAlignmentInterface(QWidget):
         QTimer.singleShot(0, self._finish_translation_review)
 
     def _finish_translation_review(self):
+        subtitle_data = dict(self.subtitle_editor.model._data)
         try:
-            if self.subtitle_editor.model._data and self.subtitle_editor.subtitle_path:
+            if subtitle_data and self.subtitle_editor.subtitle_path:
                 from videocaptioner.core.asr.asr_data import ASRData
 
-                ASRData.from_json(self.subtitle_editor.model._data).to_srt(
+                ASRData.from_json(subtitle_data).to_srt(
                     layout=SubtitleLayoutEnum.ONLY_TRANSLATE,
                     save_path=self.subtitle_editor.subtitle_path,
                 )
@@ -1246,7 +1250,7 @@ class VideoAlignmentInterface(QWidget):
         self.subtitle_editor.setVisible(False)
         self.confirm_translation_btn.setVisible(False)
         if self.workflow_thread:
-            self.workflow_thread.continue_translation()
+            self.workflow_thread.continue_translation(subtitle_data)
 
     def _on_progress(self, value, message):
         self.progress_bar.setValue(value)

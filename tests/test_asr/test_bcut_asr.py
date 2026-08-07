@@ -1,12 +1,67 @@
 """BcutASR integration tests."""
 
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+import requests
 
+import videocaptioner.core.asr.bcut as bcut_module
 from tests.test_asr.conftest import assert_asr_result_valid
 from videocaptioner.core.asr import BcutASR
 from videocaptioner.core.asr.asr_data import ASRData
+
+
+def test_result_retries_transient_ssl_error(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    response = Mock()
+    response.json.return_value = {"data": {"state": 4}}
+    get = Mock(
+        side_effect=[requests.exceptions.SSLError("unexpected eof"), response]
+    )
+    sleeps = []
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleeps.append)
+
+    assert asr.result() == {"state": 4}
+    assert get.call_count == 2
+    assert get.call_args.kwargs["timeout"] == bcut_module.RESULT_REQUEST_TIMEOUT
+    assert get.call_args.kwargs["params"]["task_id"] == "task-id"
+    assert sleeps == [1]
+
+
+def test_result_stops_after_bounded_network_retries(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    error = requests.exceptions.Timeout("timed out")
+    get = Mock(side_effect=error)
+    sleeps = []
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(requests.exceptions.Timeout, match="timed out"):
+        asr.result()
+
+    assert get.call_count == bcut_module.RESULT_REQUEST_ATTEMPTS
+    assert sleeps == [1, 2]
+
+
+def test_result_does_not_retry_http_errors(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    response = Mock()
+    response.raise_for_status.side_effect = requests.exceptions.HTTPError("403")
+    get = Mock(return_value=response)
+    sleep = Mock()
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleep)
+
+    with pytest.raises(requests.exceptions.HTTPError, match="403"):
+        asr.result()
+
+    get.assert_called_once()
+    sleep.assert_not_called()
 
 
 @pytest.mark.integration

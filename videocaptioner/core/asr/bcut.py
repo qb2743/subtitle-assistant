@@ -4,6 +4,8 @@ from typing import Any, Callable, List, Optional, Union
 
 import requests
 
+from videocaptioner.core.utils.logger import setup_logger
+
 from .asr_data import ASRDataSeg
 from .base import BaseASR
 from .status import ASRStatus
@@ -15,6 +17,10 @@ API_REQ_UPLOAD = API_BASE_URL + "/resource/create"
 API_COMMIT_UPLOAD = API_BASE_URL + "/resource/create/complete"
 API_CREATE_TASK = API_BASE_URL + "/task"
 API_QUERY_RESULT = API_BASE_URL + "/task/result"
+RESULT_REQUEST_ATTEMPTS = 3
+RESULT_REQUEST_TIMEOUT = (5, 20)
+
+logger = setup_logger("bcut")
 
 
 class BcutASR(BaseASR):
@@ -133,14 +139,35 @@ class BcutASR(BaseASR):
 
     def result(self, task_id: Optional[str] = None):
         """Query ASR result."""
-        resp = requests.get(
-            API_QUERY_RESULT,
-            params={"model_id": 7, "task_id": task_id or self.task_id},
-            headers=self.headers,
-        )
-        resp.raise_for_status()
-        resp = resp.json()
-        return resp["data"]
+        for attempt in range(RESULT_REQUEST_ATTEMPTS):
+            try:
+                resp = requests.get(
+                    API_QUERY_RESULT,
+                    params={"model_id": 7, "task_id": task_id or self.task_id},
+                    headers=self.headers,
+                    timeout=RESULT_REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                return resp.json()["data"]
+            except requests.exceptions.HTTPError:
+                raise
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as exc:
+                if attempt + 1 >= RESULT_REQUEST_ATTEMPTS:
+                    raise
+                delay = 2**attempt
+                logger.warning(
+                    "Bcut result request failed (%s/%s), retrying in %ss: %s",
+                    attempt + 1,
+                    RESULT_REQUEST_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+
+        raise RuntimeError("Bcut result request failed")
 
     def _run(
         self, callback: Optional[Callable[[int, str], None]] = None, **kwargs: Any

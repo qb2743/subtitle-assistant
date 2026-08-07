@@ -18,3 +18,16 @@ def test_trim_trailing_silence_keeps_spoken_audio(tmp_path):
 
     assert result == str(output)
     assert 280 <= get_audio_duration_ms(result) <= 320
+
+
+def test_trim_trailing_silence_removes_low_level_tail_noise(tmp_path):
+    source = tmp_path / "tts-noisy-tail.wav"
+    output = tmp_path / "tts-noisy-tail.trimmed.wav"
+    spoken = Sine(440).to_audio_segment(duration=300).apply_gain(-10)
+    low_level_tail = Sine(120).to_audio_segment(duration=400).apply_gain(-55)
+    (spoken + low_level_tail).export(source, format="wav")
+
+    result = trim_trailing_silence(str(source), str(output))
+
+    assert result == str(output)
+    assert 280 <= get_audio_duration_ms(result) <= 320

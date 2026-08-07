@@ -80,7 +80,7 @@ def build_random_mirror_filter(
     scene_cuts: Iterable[object] | None,
     *,
     video_duration: float | None = None,
-    min_shot: float = 3.0,
+    min_shot: float = 0.0,
     seed: int | None = None,
 ) -> str:
     """Build a scene-aware, deterministic random mirror filter.
@@ -105,7 +105,7 @@ def build_random_mirror_filter(
         try:
             minimum = max(0.0, float(min_shot))
         except (TypeError, ValueError):
-            minimum = 3.0
+            minimum = 0.0
         if minimum:
             kept: list[float] = []
             previous = 0.0
@@ -124,12 +124,12 @@ def build_random_mirror_filter(
         boundaries.append(None)
 
     rng = random.Random(seed)
-    # Keep mirrors scattered: 2-4 normal shots, then 1 mirrored shot and
+    # Keep mirrors scattered: 1-3 normal shots, then 1 mirrored shot and
     # occasionally 2. This avoids long accidental runs from independent coin
     # flips while retaining a different pattern for every render.
     states: list[bool] = []
     while len(states) < len(boundaries) - 1:
-        states.extend([False] * rng.randint(2, 4))
+        states.extend([False] * rng.randint(1, 3))
         states.extend([True] * (2 if rng.random() < 0.25 else 1))
     states = states[: len(boundaries) - 1]
     if states and not any(states):

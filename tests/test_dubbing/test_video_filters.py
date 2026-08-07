@@ -26,7 +26,7 @@ def test_random_filters_are_seeded():
 
 def test_random_mirror_is_scattered_in_short_runs():
     mirror = build_random_mirror_filter(
-        range(1, 20), video_duration=20.0, min_shot=0, seed=7
+        range(1, 20), video_duration=20.0, seed=7
     )
     intervals = [
         (float(start), float(end))
@@ -36,7 +36,12 @@ def test_random_mirror_is_scattered_in_short_runs():
     ]
     assert intervals
     assert all(end - start <= 2.000002 for start, end in intervals)
-    assert all(next_start - end >= 1.999998 for (_, end), (next_start, _) in zip(intervals, intervals[1:]))
+    normal_gaps = [
+        next_start - end
+        for (_, end), (next_start, _) in zip(intervals, intervals[1:])
+    ]
+    assert normal_gaps
+    assert all(0.999998 <= gap <= 3.000002 for gap in normal_gaps)
 
 
 def test_scene_mirror_keeps_frame_precision_and_prunes_short_shots():
@@ -44,7 +49,6 @@ def test_scene_mirror_keeps_frame_precision_and_prunes_short_shots():
         build_random_mirror_filter(
             [1.0, 1.1, 3.1234567],
             video_duration=8.0,
-            min_shot=0,
             seed=seed,
         )
         for seed in range(20)
@@ -53,7 +57,7 @@ def test_scene_mirror_keeps_frame_precision_and_prunes_short_shots():
     assert "hflip=enable=" in precise
 
     recurring_frame_boundary = build_random_mirror_filter(
-        [67.166667], video_duration=70.0, min_shot=0, seed=4
+        [67.166667], video_duration=70.0, seed=4
     )
     assert "67.166666" in recurring_frame_boundary
 

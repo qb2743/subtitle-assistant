@@ -352,7 +352,7 @@ class VideoTranslationThread(QThread):
                 )
 
         self.progress.emit(60, "开始字幕配音与画面对齐...")
-        config = TaskFactory.create_dubbing_config()
+        config = TaskFactory.create_dubbing_config(include_alignment_audio=True)
         # 视频字幕处理必须按字幕时间轴对齐；配音面板的固定停顿模式会跳过视频变速。
         config.fixed_line_pause = False
         # 画面变速模式保留 TTS 自然语速，不再先做一轮音频加速。

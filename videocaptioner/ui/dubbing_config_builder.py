@@ -313,8 +313,10 @@ def _provider_defaults(provider: str) -> tuple[str, str]:
     return model, api_base
 
 
-def create_dubbing_config_from_cfg() -> DubbingConfig:
-    """配音面板全局 cfg → DubbingConfig（批量配音 / 配音页线程共用）。"""
+def create_dubbing_config_from_cfg(
+    *, include_alignment_audio: bool = False
+) -> DubbingConfig:
+    """Build a GUI dubbing config, opting into video-alignment audio settings."""
     provider = cfg.dubbing_provider.value or "edge"
     if provider not in _VALID_PROVIDERS:
         provider = "edge"
@@ -381,8 +383,11 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         llm_model=llm_model if (rewrite or narrator_review) else "",
         mix_original_audio=mix_original,
         original_audio_volume=original_vol,
-        dubbed_audio_volume=10
-        ** (float(cfg.dubbing_dubbed_audio_gain_db.value) / 20),
+        dubbed_audio_volume=(
+            10 ** (float(cfg.dubbing_dubbed_audio_gain_db.value) / 20)
+            if include_alignment_audio
+            else 1.0
+        ),
         clone_audio_path=clone_audio_path,
         clone_audio_text=clone_audio_text,
         extra={
@@ -395,11 +400,23 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         subtitle_gap_ms=int(cfg.dubbing_subtitle_gap_ms.value),
         video_autorate=bool(cfg.dubbing_video_autorate.value),
         embed_subtitle=(cfg.dubbing_embed_subtitle.value or "none"),
-        separate_vocal=bool(cfg.dubbing_separate_vocal.value),
-        embed_bgm=bool(cfg.dubbing_embed_bgm.value),
-        bgm_loop=bool(cfg.dubbing_bgm_loop.value),
-        bgm_volume=float(cfg.dubbing_bgm_volume.value),
-        extra_bgm_path=(cfg.dubbing_extra_bgm_path.value or ""),
+        separate_vocal=(
+            bool(cfg.dubbing_separate_vocal.value) if include_alignment_audio else False
+        ),
+        embed_bgm=(
+            bool(cfg.dubbing_embed_bgm.value) if include_alignment_audio else False
+        ),
+        bgm_loop=(
+            bool(cfg.dubbing_bgm_loop.value) if include_alignment_audio else True
+        ),
+        bgm_volume=(
+            float(cfg.dubbing_bgm_volume.value) if include_alignment_audio else 0.8
+        ),
+        extra_bgm_path=(
+            (cfg.dubbing_extra_bgm_path.value or "")
+            if include_alignment_audio
+            else ""
+        ),
         enable_diarization=bool(cfg.dubbing_enable_diarization.value),
         speaker_count=int(cfg.dubbing_speaker_count.value),
         narrator_only=narrator_only,

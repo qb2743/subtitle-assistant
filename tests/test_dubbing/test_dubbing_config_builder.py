@@ -111,13 +111,42 @@ def test_narrator_only_ignores_hidden_role_voice_mapping(monkeypatch):
     assert config.speaker_profiles == {}
 
 
-def test_gui_dubbing_uses_configured_gain(monkeypatch):
+def test_standalone_dubbing_ignores_alignment_audio_settings(monkeypatch):
     monkeypatch.setattr(cfg.dubbing_provider, "value", "edge")
-    monkeypatch.setattr(cfg.dubbing_dubbed_audio_gain_db, "value", -6)
+    monkeypatch.setattr(cfg.dubbing_dubbed_audio_gain_db, "value", 8)
+    monkeypatch.setattr(cfg.dubbing_separate_vocal, "value", True)
+    monkeypatch.setattr(cfg.dubbing_embed_bgm, "value", True)
+    monkeypatch.setattr(cfg.dubbing_bgm_loop, "value", False)
+    monkeypatch.setattr(cfg.dubbing_bgm_volume, "value", 0.25)
+    monkeypatch.setattr(cfg.dubbing_extra_bgm_path, "value", "D:/music/bgm.mp3")
 
     config = create_dubbing_config_from_cfg()
 
+    assert config.dubbed_audio_volume == 1.0
+    assert config.separate_vocal is False
+    assert config.embed_bgm is False
+    assert config.bgm_loop is True
+    assert config.bgm_volume == 0.8
+    assert config.extra_bgm_path == ""
+
+
+def test_alignment_dubbing_uses_configured_audio_settings(monkeypatch):
+    monkeypatch.setattr(cfg.dubbing_provider, "value", "edge")
+    monkeypatch.setattr(cfg.dubbing_dubbed_audio_gain_db, "value", -6)
+    monkeypatch.setattr(cfg.dubbing_separate_vocal, "value", True)
+    monkeypatch.setattr(cfg.dubbing_embed_bgm, "value", True)
+    monkeypatch.setattr(cfg.dubbing_bgm_loop, "value", False)
+    monkeypatch.setattr(cfg.dubbing_bgm_volume, "value", 0.25)
+    monkeypatch.setattr(cfg.dubbing_extra_bgm_path, "value", "D:/music/bgm.mp3")
+
+    config = create_dubbing_config_from_cfg(include_alignment_audio=True)
+
     assert math.isclose(20 * math.log10(config.dubbed_audio_volume), -6.0)
+    assert config.separate_vocal is True
+    assert config.embed_bgm is True
+    assert config.bgm_loop is False
+    assert config.bgm_volume == 0.25
+    assert config.extra_bgm_path == "D:/music/bgm.mp3"
 
 
 def test_provider_rejects_other_provider_model(monkeypatch):

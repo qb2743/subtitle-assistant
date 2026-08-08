@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 from videocaptioner.config import MODEL_PATH
-from videocaptioner.ui.common.config import cfg
+from videocaptioner.core.dubbing import DubbingConfig
 from videocaptioner.core.entities import (
     LANGUAGES,
     FullProcessTask,
@@ -16,11 +16,11 @@ from videocaptioner.core.entities import (
     TranscribeTask,
     TranscriptAndSubtitleTask,
 )
-from videocaptioner.core.dubbing import DubbingConfig
 from videocaptioner.core.llm.client import resolve_llm_base_url
+from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.dubbing_config_builder import create_dubbing_config_from_cfg
 from videocaptioner.ui.dubbing_config_builder import (
-    create_dubbing_config_from_cfg,
-    resolve_dubbing_voice,
+    resolve_dubbing_voice as resolve_dubbing_voice,
 )
 
 
@@ -304,7 +304,11 @@ class TaskFactory:
         )
 
     @staticmethod
-    def create_dubbing_config() -> DubbingConfig:
+    def create_dubbing_config(
+        include_alignment_audio: bool = False,
+    ) -> DubbingConfig:
         """从配音面板全局 cfg 创建配置（与 CLI dub 命令字段对齐）。"""
-        return create_dubbing_config_from_cfg()
+        return create_dubbing_config_from_cfg(
+            include_alignment_audio=include_alignment_audio
+        )
 

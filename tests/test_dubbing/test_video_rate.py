@@ -16,6 +16,7 @@ from videocaptioner.core.dubbing.video_rate import (
     RatePlan,
     apply_video_rate,
     compute_rate_plan,
+    map_source_interval,
 )
 
 # ---------------------------------------------------------------- pure plan
@@ -101,6 +102,28 @@ def test_rate_plan_empty():
     assert plan.total_output_duration_ms == 0
     assert placements == []
     assert extra == []
+
+
+def test_rate_plan_keeps_original_dialogue_slot_at_normal_speed():
+    plan, placements, extra = compute_rate_plan(
+        [(0, 1000), (3000, 4000)],
+        [2000, 500],
+        0,
+        video_duration_ms=4000,
+        max_slowdown=2.0,
+        locked_slots=[(1000, 3000)],
+    )
+
+    assert [
+        (item.start_ms, item.end_ms, item.pts_factor) for item in plan.items
+    ] == [
+        (0, 1000, 2.0),
+        (1000, 3000, 1.0),
+        (3000, 4000, 0.5),
+    ]
+    assert placements == [(0, 2000), (4000, 4500)]
+    assert extra == [1.0, 1.0]
+    assert map_source_interval(plan, 1000, 3000) == (2000, 4000)
 
 
 # ------------------------------------------------------------- ffmpeg smoke

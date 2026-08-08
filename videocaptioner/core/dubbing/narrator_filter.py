@@ -259,7 +259,7 @@ def filter_narrator_subtitles(
     subtitles: list[DubbingSegment],  # 含 start_ms/end_ms(毫秒)/text
     speakers: list,  # speaker.json 平行数组(长度可与 subtitles 不等)
     min_share: float = DEFAULT_MIN_SHARE,
-    keep_same_lang: bool = True,
+    keep_same_lang: bool = False,
     keep_unlabeled: bool = False,
     preferred_speaker: Optional[str] = None,
 ) -> tuple[list[int], dict]:
@@ -271,7 +271,7 @@ def filter_narrator_subtitles(
     决策(逐行):
     - speaker 无效 → keep_unlabeled 则留(reason='unlabeled_kept') 否则删('unlabeled_dropped')
     - == narrator → 留('narrator_speaker')
-    - keep_same_lang 且 lang_matches_narrator → 留('same_lang_as_narrator')
+    - keep_same_lang 显式开启且 lang_matches_narrator → 留('same_lang_as_narrator')
     - 其余 → 删('other_speaker' 或 'other_speaker_lang_<lang>')
 
     report 在 pick_narrator 结果上追加:

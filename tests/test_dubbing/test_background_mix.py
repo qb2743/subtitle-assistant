@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pydub import AudioSegment
+from pydub.generators import Sine
 
 from videocaptioner.core.dubbing.background_mix import (
     build_mix_command,
@@ -52,7 +54,7 @@ def test_build_mix_two_inputs_volume_and_loop():
     assert cmd[cmd.index("-stream_loop") + 1] == "-1"
     fc = cmd[cmd.index("-filter_complex") + 1]
     assert "[1:a]volume=0.800[a1]" in fc
-    assert "amix=inputs=2:duration=first:dropout_transition=2[a]" in fc
+    assert "amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]" in fc
     assert cmd[-1] == "out.wav"
 
 
@@ -83,7 +85,7 @@ def test_build_mix_three_way_extra_bgm():
     # 三路混音:instrument 与 extra_bgm 都乘 volume。
     assert "[1:a]volume=0.500[a1]" in fc
     assert "[2:a]volume=0.500[a2]" in fc
-    assert "amix=inputs=3:duration=first:dropout_transition=2[a]" in fc
+    assert "amix=inputs=3:duration=first:dropout_transition=2:normalize=0[a]" in fc
     # -stream_loop -1 应出现在两个背景输入前。
     assert cmd.count("-stream_loop") == 2
 
@@ -98,7 +100,7 @@ def test_build_mix_extra_bgm_only():
         output_path="out.wav",
     )
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert "amix=inputs=2:duration=first:dropout_transition=2[a]" in fc
+    assert "amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]" in fc
     assert "[1:a]volume=0.800[a1]" in fc
 
 
@@ -171,6 +173,30 @@ def test_mix_background_output_exists_and_duration_matches_first(tmp_path):
     assert out.exists() and out.stat().st_size > 0
     # duration=first → 以配音轨(3s)为总时长。
     assert abs(_audio_duration_ms(out) - 3000) < 150
+
+
+@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg/ffprobe not available")
+def test_mix_background_keeps_dubbed_level_when_bgm_is_silent(tmp_path):
+    dub = tmp_path / "dub.wav"
+    bgm = tmp_path / "bgm.wav"
+    out = tmp_path / "out.wav"
+    dubbed = (
+        Sine(440).to_audio_segment(duration=1000).apply_gain(-18).set_channels(2)
+    )
+    dubbed.export(dub, format="wav")
+    AudioSegment.silent(duration=1000, frame_rate=dubbed.frame_rate).set_channels(
+        2
+    ).export(bgm, format="wav")
+
+    mix_background(
+        str(dub),
+        extra_bgm_path=str(bgm),
+        volume=0.8,
+        loop=False,
+        output_path=str(out),
+    )
+
+    assert abs(AudioSegment.from_file(out).dBFS - dubbed.dBFS) < 1
 
 
 @pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg/ffprobe not available")

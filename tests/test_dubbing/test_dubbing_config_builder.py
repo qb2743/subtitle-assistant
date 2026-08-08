@@ -5,6 +5,9 @@ from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.dubbing_config_builder import (
     create_dubbing_config_from_cfg,
     diarization_language_from_transcribe,
+    parse_speaker_voice_maps,
+    speaker_voice_map_for_provider,
+    update_speaker_voice_map,
 )
 
 
@@ -55,6 +58,57 @@ def test_speaker_settings_are_forwarded(monkeypatch):
     assert config.speaker_count == 3
     assert config.narrator_only is True
     assert config.narrator_llm_review is True
+
+
+def test_speaker_voice_maps_are_provider_scoped():
+    raw = update_speaker_voice_map(
+        '{"gemini": {"spk0": "Kore"}}',
+        "edge",
+        {"spk0": "zh-CN-XiaoxiaoNeural", "spk1": ""},
+    )
+
+    assert parse_speaker_voice_maps(raw) == {
+        "edge": {"spk0": "zh-CN-XiaoxiaoNeural"},
+        "gemini": {"spk0": "Kore"},
+    }
+    assert speaker_voice_map_for_provider(raw, "EDGE") == {
+        "spk0": "zh-CN-XiaoxiaoNeural"
+    }
+    assert parse_speaker_voice_maps("not-json") == {}
+
+
+def test_current_provider_speaker_voices_become_profiles(monkeypatch):
+    monkeypatch.setattr(cfg.dubbing_provider, "value", "edge")
+    monkeypatch.setattr(cfg.dubbing_model, "value", "edge-tts")
+    monkeypatch.setattr(cfg.dubbing_narrator_only, "value", False)
+    monkeypatch.setattr(
+        cfg.dubbing_speaker_voice_map,
+        "value",
+        '{"edge": {"spk0": "zh-CN-XiaoxiaoNeural"}, '
+        '"gemini": {"spk0": "Kore"}}',
+    )
+
+    config = create_dubbing_config_from_cfg()
+
+    assert set(config.speaker_profiles) == {"spk0"}
+    assert config.speaker_profiles["spk0"].voice == "zh-CN-XiaoxiaoNeural"
+
+
+def test_narrator_only_ignores_hidden_role_voice_mapping(monkeypatch):
+    monkeypatch.setattr(cfg.dubbing_provider, "value", "edge")
+    monkeypatch.setattr(cfg.dubbing_model, "value", "edge-tts")
+    monkeypatch.setattr(cfg.dubbing_voice, "value", "zh-CN-XiaoxiaoNeural")
+    monkeypatch.setattr(cfg.dubbing_narrator_only, "value", True)
+    monkeypatch.setattr(
+        cfg.dubbing_speaker_voice_map,
+        "value",
+        '{"edge": {"spk0": "zh-CN-YunxiNeural"}}',
+    )
+
+    config = create_dubbing_config_from_cfg()
+
+    assert config.voice == "zh-CN-XiaoxiaoNeural"
+    assert config.speaker_profiles == {}
 
 
 def test_gui_dubbing_uses_configured_gain(monkeypatch):

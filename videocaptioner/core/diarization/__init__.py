@@ -9,7 +9,13 @@
 模型缺失时经 :class:`ModelDownloader` 下载到 ``MODEL_PATH/diarization``。
 """
 
-from .assign import assign_speakers, read_speaker_json, write_speaker_json
+from .assign import (
+    assign_speakers,
+    read_speaker_json,
+    remap_speakers_ms,
+    speaker_sidecar_path,
+    write_speaker_json,
+)
 from .speaker_diarizer import diarize
 
 __all__ = [
@@ -17,4 +23,6 @@ __all__ = [
     "assign_speakers",
     "write_speaker_json",
     "read_speaker_json",
+    "remap_speakers_ms",
+    "speaker_sidecar_path",
 ]

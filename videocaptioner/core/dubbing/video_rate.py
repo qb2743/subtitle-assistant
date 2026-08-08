@@ -69,6 +69,7 @@ def compute_rate_plan(
     gap_ms: int,
     video_duration_ms: int,
     max_slowdown: float,
+    locked_slots: Optional[List[Tuple[int, int]]] = None,
 ) -> Tuple[RatePlan, List[Tuple[int, int]], List[float]]:
     """Compute the video rate plan and the audio placements it implies.
 
@@ -78,10 +79,11 @@ def compute_rate_plan(
     tail ``[e_last, V)``. Zero-length intervals are skipped. Every interval is
     kept in the plan, so no picture is ever dropped.
 
-    Each subtitle owns the source interval from its start to the next subtitle
-    start (the final subtitle owns the remaining video). The interval is sped up
-    or slowed down to ``dub duration + gap_ms``. This matches pyVideoTrans and
-    removes long source pauses left by filtered dialogue lines.
+    Each dubbed subtitle owns the source interval from its start to the next
+    subtitle event. ``locked_slots`` add display-only events for original-film
+    dialogue. A locked event owns its interval at ``1.0x`` and its explicit
+    source range always takes priority over a dubbed interval. This keeps the
+    original dialogue picture untouched without sending that text to TTS.
 
     When even the maximum slow-down cannot fit the audio
     (``d_i > slot_len * max_slowdown``), the audio itself must be compressed a
@@ -95,6 +97,7 @@ def compute_rate_plan(
         gap_ms: silence inserted after each dub (ms).
         video_duration_ms: total length of the source video (ms).
         max_slowdown: cap on the slow-down factor (``>1``).
+        locked_slots: source intervals that must remain at normal speed.
 
     Returns:
         A ``(plan, placements, extra_tempo)`` tuple. ``placements[i]`` is the
@@ -110,56 +113,136 @@ def compute_rate_plan(
     max_rate = max(1.0, float(max_slowdown))
     gap_ms = max(0, int(gap_ms))
     extra_tempo: List[float] = [1.0] * count
-    intervals: List[List] = []
-    first_start = max(0, int(slots[0][0]))
-    if first_start > 0:
-        intervals.append([0, first_start, 1.0, 0, -1])
+    normalized_slots = [
+        (max(0, int(start)), max(max(0, int(start)) + 1, int(end)))
+        for start, end in slots[:count]
+    ]
+    normalized_locked = [
+        (max(0, int(start)), max(max(0, int(start)) + 1, int(end)))
+        for start, end in (locked_slots or [])
+    ]
+    video_end = max(
+        int(video_duration_ms),
+        *(end for _start, end in normalized_slots),
+        *(end for _start, end in normalized_locked),
+    )
 
-    for i in range(count):
-        start = max(0, int(slots[i][0]))
-        if i + 1 < count:
-            end = max(start + 1, int(slots[i + 1][0]))
-        else:
-            end = max(start + 1, int(slots[i][1]), int(video_duration_ms))
-        source_duration = end - start
-        max_target = source_duration * max_rate
-        min_target = source_duration / max_rate
-        effective_gap = min(gap_ms, max(0, int(max_target) - 100))
-        audio_duration = max(1, int(audio_durations_ms[i]))
-        available_audio = max(1, max_target - effective_gap)
-        if audio_duration > available_audio:
-            extra_tempo[i] = audio_duration / available_audio
-        effective_audio = audio_duration / extra_tempo[i]
-        target_duration = min(
-            max(effective_audio + effective_gap, min_target), max_target
-        )
-        intervals.append(
-            [start, end, target_duration / source_duration, 0, i]
-        )
+    event_by_start: dict[int, tuple[str, Optional[int]]] = {}
+    for index, (start, _end) in enumerate(normalized_slots):
+        event_by_start.setdefault(start, ("dub", index))
+    for start, _end in normalized_locked:
+        event_by_start[start] = ("locked", None)
+    event_starts = sorted(start for start in event_by_start if start < video_end)
 
-    # Convert intervals to plan items, tracking each slot's output start.
     items: List[RatePlanItem] = []
-    slot_output_starts: dict = {}
-    cursor = 0
-    for s, e, pts, pad, slot_idx in intervals:
-        out_dur = (e - s) * pts
-        if slot_idx >= 0:
-            slot_output_starts[slot_idx] = cursor
-        items.append(
-            RatePlanItem(start_ms=s, end_ms=e, pts_factor=pts, pad_after_ms=pad)
-        )
-        cursor += out_dur + pad
-    total_output_duration_ms = round(cursor)
+    slot_output_starts: dict[int, float] = {}
+    cursor = 0.0
+    if event_starts and event_starts[0] > 0:
+        items.append(RatePlanItem(0, event_starts[0], 1.0, 0))
+        cursor = float(event_starts[0])
 
-    # Audio placements derived from the plan's output timeline.
+    for event_position, start in enumerate(event_starts):
+        end = (
+            event_starts[event_position + 1]
+            if event_position + 1 < len(event_starts)
+            else video_end
+        )
+        if end <= start:
+            continue
+        kind, slot_index = event_by_start[start]
+        boundaries = {start, end}
+        for locked_start, locked_end in normalized_locked:
+            if start < locked_start < end:
+                boundaries.add(locked_start)
+            if start < locked_end < end:
+                boundaries.add(locked_end)
+        ordered = sorted(boundaries)
+        pieces: list[tuple[int, int, bool]] = []
+        for piece_start, piece_end in zip(ordered, ordered[1:]):
+            protected = kind == "locked" or any(
+                locked_start < piece_end and locked_end > piece_start
+                for locked_start, locked_end in normalized_locked
+            )
+            pieces.append((piece_start, piece_end, protected))
+
+        if kind == "dub" and slot_index is not None:
+            slot_output_starts[slot_index] = cursor
+            fixed_duration = sum(
+                piece_end - piece_start
+                for piece_start, piece_end, protected in pieces
+                if protected
+            )
+            flexible_duration = (end - start) - fixed_duration
+            min_target = fixed_duration + flexible_duration / max_rate
+            max_target = fixed_duration + flexible_duration * max_rate
+            effective_gap = min(gap_ms, max(0, int(max_target) - 100))
+            audio_duration = max(1, int(audio_durations_ms[slot_index]))
+            available_audio = max(1.0, max_target - effective_gap)
+            if audio_duration > available_audio:
+                extra_tempo[slot_index] = audio_duration / available_audio
+            effective_audio = audio_duration / extra_tempo[slot_index]
+            target_duration = min(
+                max(effective_audio + effective_gap, min_target), max_target
+            )
+            pts_factor = (
+                (target_duration - fixed_duration) / flexible_duration
+                if flexible_duration > 0
+                else 1.0
+            )
+        else:
+            pts_factor = 1.0
+
+        for piece_start, piece_end, protected in pieces:
+            factor = 1.0 if protected else pts_factor
+            items.append(RatePlanItem(piece_start, piece_end, factor, 0))
+            cursor += (piece_end - piece_start) * factor
+
+    total_output_duration_ms = round(cursor)
+    plan = RatePlan(items=items, total_output_duration_ms=total_output_duration_ms)
+
     placements: List[Tuple[int, int]] = []
-    for i in range(len(slots)):
-        start = round(slot_output_starts[i])
-        audio_eff = round(audio_durations_ms[i] / extra_tempo[i])
+    for index, (source_start, _source_end) in enumerate(normalized_slots):
+        start = round(
+            slot_output_starts.get(
+                index,
+                map_source_timestamp(plan, source_start, edge="start"),
+            )
+        )
+        audio_eff = round(audio_durations_ms[index] / extra_tempo[index])
         placements.append((start, start + audio_eff))
 
-    plan = RatePlan(items=items, total_output_duration_ms=total_output_duration_ms)
     return plan, placements, extra_tempo
+
+
+def map_source_timestamp(plan: RatePlan, timestamp_ms: int, *, edge: str = "start") -> int:
+    """Map one source-video timestamp onto the output timeline."""
+    timestamp = max(0, int(timestamp_ms))
+    if not plan.items:
+        return timestamp
+    cursor = 0.0
+    last_end = 0
+    for item in plan.items:
+        if timestamp < item.start_ms:
+            return round(cursor + timestamp - last_end)
+        if item.start_ms <= timestamp < item.end_ms:
+            return round(cursor + (timestamp - item.start_ms) * item.pts_factor)
+        item_end = cursor + (item.end_ms - item.start_ms) * item.pts_factor
+        if timestamp == item.end_ms and edge == "end":
+            return round(item_end)
+        cursor = item_end + item.pad_after_ms
+        last_end = item.end_ms
+        if timestamp == item.end_ms:
+            continue
+    return round(cursor + max(0, timestamp - last_end))
+
+
+def map_source_interval(
+    plan: RatePlan, start_ms: int, end_ms: int
+) -> Tuple[int, int]:
+    """Map a source interval without absorbing padding at its right edge."""
+    start = map_source_timestamp(plan, start_ms, edge="start")
+    end = map_source_timestamp(plan, end_ms, edge="end")
+    return start, max(start + 1, end)
 
 
 def get_video_duration_ms(video_path: str) -> int:

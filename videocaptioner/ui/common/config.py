@@ -313,9 +313,15 @@ class Config(QConfig):
         0,
         OptionsValidator([0, 2, 3, 4, 5, 6]),
     )
+    # 按 TTS 渠道保存 spkN -> voice id 映射(JSON 字符串)。
+    dubbing_speaker_voice_map = ConfigItem("Dubbing", "SpeakerVoiceMap", "{}")
     # 仅保留主说话人的解说/旁白字幕
     dubbing_narrator_only = ConfigItem(
         "Dubbing", "NarratorOnly", False, BoolValidator()
+    )
+    # 是否翻译被解说筛选排除的原片对白字幕；这些字幕不参与配音。
+    dubbing_translate_original_subtitles = ConfigItem(
+        "Dubbing", "TranslateOriginalSubtitles", False, BoolValidator()
     )
     # 对被旁白过滤删掉的字幕进行 LLM 二次复核
     dubbing_narrator_llm_review = ConfigItem(

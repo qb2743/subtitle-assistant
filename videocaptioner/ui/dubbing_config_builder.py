@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from videocaptioner.core.dubbing import DubbingConfig
+import json
+
+from videocaptioner.core.dubbing import DubbingConfig, SpeakerProfile
 from videocaptioner.core.dubbing.models import FitMode
 from videocaptioner.core.dubbing.presets import normalize_dubbing_voice
 from videocaptioner.core.entities import LLMServiceEnum
@@ -124,6 +126,54 @@ _DUBBING_API_KEY_ATTRS = {
     "gemini": "dubbing_api_key_gemini",
     "fishaudio": "dubbing_api_key_fishaudio",
 }
+
+
+def parse_speaker_voice_maps(raw) -> dict[str, dict[str, str]]:
+    """Parse provider-scoped speaker voice mappings from GUI config."""
+    if isinstance(raw, dict):
+        payload = raw
+    else:
+        try:
+            payload = json.loads(str(raw or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for provider, mapping in payload.items():
+        if not isinstance(mapping, dict):
+            continue
+        clean = {
+            str(speaker).strip(): str(voice).strip()
+            for speaker, voice in mapping.items()
+            if str(speaker).strip() and str(voice).strip()
+        }
+        if clean:
+            result[str(provider).strip().lower()] = clean
+    return result
+
+
+def speaker_voice_map_for_provider(raw, provider: str) -> dict[str, str]:
+    """Return one provider's persisted ``speaker -> voice`` mapping."""
+    return dict(parse_speaker_voice_maps(raw).get((provider or "").lower(), {}))
+
+
+def update_speaker_voice_map(raw, provider: str, mapping: dict[str, str]) -> str:
+    """Replace one provider mapping and serialize the complete config value."""
+    maps = parse_speaker_voice_maps(raw)
+    provider_key = (provider or "").strip().lower()
+    clean = {
+        str(speaker).strip(): str(voice).strip()
+        for speaker, voice in mapping.items()
+        if str(speaker).strip() and str(voice).strip()
+    }
+    if provider_key:
+        if clean:
+            maps[provider_key] = clean
+        else:
+            maps.pop(provider_key, None)
+    return json.dumps(maps, ensure_ascii=False, sort_keys=True)
 
 
 def _subtitle_style_fields() -> tuple[str, dict | None]:
@@ -275,6 +325,21 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
     raw_voice = cfg.dubbing_voice.value or ""
     voice = resolve_dubbing_voice(provider, raw_voice)
     voice = normalize_dubbing_voice(provider, model, voice)
+    narrator_only = bool(cfg.dubbing_narrator_only.value)
+    speaker_voice_map = (
+        {}
+        if narrator_only
+        else speaker_voice_map_for_provider(
+            cfg.dubbing_speaker_voice_map.value, provider
+        )
+    )
+    speaker_profiles = {
+        speaker: SpeakerProfile(
+            name=speaker,
+            voice=normalize_dubbing_voice(provider, model, mapped_voice),
+        )
+        for speaker, mapped_voice in speaker_voice_map.items()
+    }
 
     fit_mode, max_speed = _resolve_timing()
     mix_original, original_vol = _resolve_audio_mix()
@@ -304,6 +369,7 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         base_url=base_url,
         model=model,
         voice=voice,
+        speaker_profiles=speaker_profiles,
         speed=float(cfg.dubbing_speed.value),
         tts_workers=int(cfg.dubbing_tts_workers.value),
         fit_mode=fit_mode,
@@ -336,7 +402,7 @@ def create_dubbing_config_from_cfg() -> DubbingConfig:
         extra_bgm_path=(cfg.dubbing_extra_bgm_path.value or ""),
         enable_diarization=bool(cfg.dubbing_enable_diarization.value),
         speaker_count=int(cfg.dubbing_speaker_count.value),
-        narrator_only=bool(cfg.dubbing_narrator_only.value),
+        narrator_only=narrator_only,
         narrator_llm_review=narrator_review,
         diarization_language=diarization_language_from_transcribe(
             cfg.transcribe_language.value

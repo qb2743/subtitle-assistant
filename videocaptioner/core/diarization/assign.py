@@ -23,6 +23,8 @@ __all__ = [
     "write_speaker_json",
     "read_speaker_json",
     "assign_speakers_ms",
+    "remap_speakers_ms",
+    "speaker_sidecar_path",
 ]
 
 
@@ -99,6 +101,34 @@ def assign_speakers_ms(
     return output
 
 
+def remap_speakers_ms(
+    source_subtitles: List[tuple[int, int]],
+    source_speakers: List[str],
+    target_subtitles: List[tuple[int, int]],
+) -> List[str]:
+    """Remap line-level speaker labels to a changed subtitle timeline.
+
+    Translation, subtitle splitting, and manual editing may change line indexes
+    while retaining the underlying time ranges. Treat each labelled source row
+    as a speaker interval and reuse the normal overlap assignment for the final
+    rows. Blank or invalid source labels are ignored.
+    """
+    labelled_intervals: List[tuple[tuple[int, int], str]] = []
+    for interval, raw_speaker in zip(source_subtitles, source_speakers):
+        if len(interval) != 2 or interval[0] >= interval[1]:
+            continue
+        speaker = str(raw_speaker or "").strip()
+        if not speaker:
+            continue
+        labelled_intervals.append(((int(interval[0]), int(interval[1])), speaker))
+    return assign_speakers_ms(target_subtitles, labelled_intervals)
+
+
+def speaker_sidecar_path(subtitle_path: str | Path) -> Path:
+    """Return the conventional ``<subtitle-stem>.speaker.json`` sidecar path."""
+    return Path(subtitle_path).with_suffix(".speaker.json")
+
+
 def assign_speakers(segments: list, diarizations: List[dict]) -> List[str]:
     """把说话人区间分配到 DubbingSegment 上,返回平行 ``"spk0"/""`` 数组。
 
@@ -148,5 +178,5 @@ def read_speaker_json(path: str | Path) -> list:
         if isinstance(data, list):
             return data
         return []
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return []

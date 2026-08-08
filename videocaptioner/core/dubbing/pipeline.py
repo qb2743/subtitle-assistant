@@ -28,6 +28,7 @@ from .audio import (
     create_timeline_audio,
     get_audio_duration_ms,
     mux_dubbed_audio,
+    overlay_source_audio_intervals,
     trim_trailing_silence,
 )
 from .background_mix import mix_background
@@ -41,7 +42,11 @@ from .models import (
 from .presets import FISHAUDIO_PRESET_VOICES
 from .rewriter import rewrite_segments_if_needed
 from .subtitle_parser import load_dubbing_segments
-from .timeline import compute_timeline_placements, write_adjusted_subtitle
+from .timeline import (
+    compute_timeline_placements,
+    write_adjusted_subtitle,
+    write_composite_subtitle,
+)
 from .video_rate import (
     RatePlan,
     apply_video_rate,
@@ -158,6 +163,8 @@ class DubbingPipeline:
         video_path: Optional[str] = None,
         output_video_path: Optional[str] = None,
         text_track: str = "auto",
+        display_subtitle_path: Optional[str] = None,
+        protected_subtitle_path: Optional[str] = None,
         work_dir: Optional[str] = None,
         callback: Optional[ProgressCallback] = None,
     ) -> DubbingResult:
@@ -185,6 +192,8 @@ class DubbingPipeline:
                 video_path=video_path,
                 output_video_path=output_video_path,
                 text_track=text_track,
+                display_subtitle_path=display_subtitle_path,
+                protected_subtitle_path=protected_subtitle_path,
                 cb=cb,
             )
         finally:
@@ -199,12 +208,25 @@ class DubbingPipeline:
         video_path: Optional[str],
         output_video_path: Optional[str],
         text_track: str,
+        display_subtitle_path: Optional[str],
+        protected_subtitle_path: Optional[str],
         cb: ProgressCallback,
     ) -> DubbingResult:
         cb(2, "loading subtitles")
         segments = load_dubbing_segments(subtitle_path, text_track=text_track)
         if not segments:
             raise ValueError("No subtitle lines found for dubbing")
+        display_segments = (
+            load_dubbing_segments(display_subtitle_path, text_track="source")
+            if display_subtitle_path
+            else []
+        )
+        protected_source = protected_subtitle_path or display_subtitle_path
+        protected_segments = (
+            load_dubbing_segments(protected_source, text_track="source")
+            if protected_source
+            else []
+        )
 
         warnings: list[str] = []
         instrument_path: Optional[str] = None
@@ -278,9 +300,14 @@ class DubbingPipeline:
         segments = [seg for seg in ordered if seg is not None]
         adjusted_subtitle_path: Optional[Path] = None
         video_plan: Optional[RatePlan] = None
+        subtitle_placements: list[tuple[int, int]] = []
         if self.config.fixed_line_pause:
             # 固定停顿模式忽略原时间轴,不做视频变速。
             timeline_items, duration_ms = self._build_fixed_pause_timeline(segments, work)
+            subtitle_placements = [
+                (start, start + segment.fitted_duration_ms)
+                for segment, (_path, start) in zip(segments, timeline_items)
+            ]
         elif self.config.video_autorate and video_path:
             # 视频变速:由 rate plan 统一推导输出时间轴,音频放置从计划反推。
             slots = [(seg.start_ms, seg.end_ms) for seg in segments]
@@ -292,6 +319,10 @@ class DubbingPipeline:
                 self.config.subtitle_gap_ms,
                 video_duration_ms,
                 self.config.max_video_slowdown,
+                locked_slots=[
+                    (segment.start_ms, segment.end_ms)
+                    for segment in protected_segments
+                ],
             )
             # 对超限段二次压缩音频,保证音频必然放得下。
             for i, seg in enumerate(segments):
@@ -303,14 +334,8 @@ class DubbingPipeline:
             timeline_items = [
                 (seg.fitted_path, placements[i][0]) for i, seg in enumerate(segments)
             ]
+            subtitle_placements = placements
             duration_ms = plan.total_output_duration_ms
-            adjusted_subtitle_path = Path(
-                write_adjusted_subtitle(
-                    segments,
-                    placements,
-                    str(out_audio.with_name(out_audio.stem + ".adjusted.srt")),
-                )
-            )
             video_plan = plan
 
         elif self.config.subtitle_gap_ms > 0:
@@ -323,16 +348,10 @@ class DubbingPipeline:
             timeline_items = [
                 (seg.fitted_path, placements[i][0]) for i, seg in enumerate(segments)
             ]
+            subtitle_placements = placements
             duration_ms = max(
                 max(seg.end_ms for seg in segments),
                 placements[-1][1],
-            )
-            adjusted_subtitle_path = Path(
-                write_adjusted_subtitle(
-                    segments,
-                    placements,
-                    str(out_audio.with_name(out_audio.stem + ".adjusted.srt")),
-                )
             )
         else:
             for segment in segments:
@@ -342,10 +361,36 @@ class DubbingPipeline:
                     warning = f"segment {segment.index} exceeds target by {overflow_ms} ms"
                     segment.warning = warning
                     warnings.append(warning)
+            subtitle_placements = [
+                (segment.start_ms, segment.end_ms) for segment in segments
+            ]
 
             duration_ms = max(
                 max(seg.end_ms for seg in segments),
                 max(seg.start_ms + seg.fitted_duration_ms for seg in segments),
+            )
+        adjusted_output = str(
+            out_audio.with_name(out_audio.stem + ".adjusted.srt")
+        )
+        if display_segments:
+            adjusted_subtitle_path = Path(
+                write_composite_subtitle(
+                    segments,
+                    subtitle_placements,
+                    display_segments,
+                    adjusted_output,
+                    rate_plan=video_plan,
+                )
+            )
+        elif video_plan is not None or (
+            not self.config.fixed_line_pause and self.config.subtitle_gap_ms > 0
+        ):
+            adjusted_subtitle_path = Path(
+                write_adjusted_subtitle(
+                    segments,
+                    subtitle_placements,
+                    adjusted_output,
+                )
             )
         cb(88, "assembling audio")
         create_timeline_audio(
@@ -354,6 +399,26 @@ class DubbingPipeline:
             duration_ms,
             volume=self.config.dubbed_audio_volume,
         )
+        if protected_segments and video_path and (
+            video_plan is not None or not self.config.mix_original_audio
+        ):
+            cb(89, "restoring original audio")
+            try:
+                overlay_source_audio_intervals(
+                    video_path,
+                    str(out_audio),
+                    [
+                        (segment.start_ms, segment.end_ms)
+                        for segment in protected_segments
+                    ],
+                    rate_plan=video_plan,
+                    blocking_intervals=[
+                        (segment.start_ms, segment.end_ms) for segment in segments
+                    ],
+                )
+            except Exception as exc:
+                warnings.append(f"原片字幕区间原声恢复失败,已跳过: {exc}")
+                logger.warning("原片字幕区间原声恢复失败,已跳过: %s", exc)
 
         instrument_to_mix = instrument_path if self.config.embed_bgm else None
         if instrument_to_mix or self.config.extra_bgm_path:
@@ -563,7 +628,11 @@ class DubbingPipeline:
         speaker_labels: Optional[list[str]] = None
         try:
             from videocaptioner.core.diarization import diarize
-            from videocaptioner.core.diarization.assign import assign_speakers, write_speaker_json
+            from videocaptioner.core.diarization.assign import (
+                assign_speakers,
+                speaker_sidecar_path,
+                write_speaker_json,
+            )
 
             cb(3, "identifying speakers")
             # 分离器内部 0-100 进度映射到流水线 3-4 区间,保持 UI 进度单调。
@@ -578,10 +647,16 @@ class DubbingPipeline:
                 isolate_process=True,
             )
             speaker_labels = assign_speakers(segments, diarizations)
-            write_speaker_json(
-                speaker_labels,
-                str(out_audio.with_name(out_audio.stem + ".speaker.json")),
-            )
+            for segment, label in zip(segments, speaker_labels):
+                segment.speaker = str(label or "").strip() or "default"
+            try:
+                write_speaker_json(
+                    speaker_labels,
+                    speaker_sidecar_path(out_audio),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                warnings.append(f"说话人标签文件写入失败,已继续处理: {exc}")
+                logger.warning("说话人标签文件写入失败,已继续处理: %s", exc)
             logger.info(
                 "说话人识别完成,共 %d 个说话人标签",
                 len(set(spk for spk in speaker_labels if spk)),
@@ -598,18 +673,13 @@ class DubbingPipeline:
                     filter_narrator_subtitles,
                 )
 
-                kept_indices, report = filter_narrator_subtitles(segments, speaker_labels)
+                kept_indices, report = filter_narrator_subtitles(
+                    segments,
+                    speaker_labels,
+                    keep_same_lang=False,
+                )
                 kept_set = set(kept_indices)
                 dropped_indices = [i for i in range(len(segments)) if i not in kept_set]
-
-                # 被删字幕写 SRT 到输出目录,便于人工复核。
-                self._write_dropped_subtitles(
-                    segments,
-                    dropped_indices,
-                    str(out_audio.with_name(out_audio.stem + ".narrator_dropped.srt")),
-                )
-                if dropped_indices:
-                    warnings.append(f"解说员过滤删除 {len(dropped_indices)} 条字幕")
 
                 if (
                     self.config.narrator_llm_review
@@ -636,7 +706,13 @@ class DubbingPipeline:
                             # 0/100 relative progress by design.
                             progress=lambda p, s: cb(3 + int(p) // 100, s),
                         )
-                        restore_orig = [dropped_indices[i] for i in restore_dropped]
+                        restore_orig = [
+                            dropped_indices[i]
+                            for i in restore_dropped
+                            if isinstance(i, int)
+                            and not isinstance(i, bool)
+                            and 0 <= i < len(dropped_indices)
+                        ]
                         if restore_orig:
                             warnings.append(f"LLM 复核恢复 {len(restore_orig)} 条字幕")
                             kept_indices = sorted(kept_set | set(restore_orig))
@@ -645,9 +721,37 @@ class DubbingPipeline:
                         warnings.append(f"LLM 复核失败,已跳过: {exc}")
                         logger.warning("LLM 复核失败,已跳过: %s", exc)
 
+                final_kept_set = set(kept_indices)
+                dropped_indices = [
+                    i for i in range(len(segments)) if i not in final_kept_set
+                ]
+                # 只记录复核后仍被删除的字幕，避免把已恢复旁白误报为删除。
+                try:
+                    self._write_dropped_subtitles(
+                        segments,
+                        dropped_indices,
+                        str(
+                            out_audio.with_name(
+                                out_audio.stem + ".narrator_dropped.srt"
+                            )
+                        ),
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    warnings.append(f"删除字幕清单写入失败,已继续筛选: {exc}")
+                    logger.warning("删除字幕清单写入失败,已继续筛选: %s", exc)
+                if dropped_indices:
+                    warnings.append(f"解说员过滤删除 {len(dropped_indices)} 条字幕")
+
                 segments = [segments[i] for i in sorted(kept_indices)]
                 if not segments:
                     raise ValueError("解说员过滤后无剩余字幕,请调整识别参数或关闭仅保留解说员")
+                narrator_speaker = str(report.get("narrator_speaker_id") or "").strip()
+                if narrator_speaker:
+                    # LLM review restores rows specifically because they are
+                    # misclassified narration, so they must keep the narrator
+                    # voice rather than the diarizer's incorrect role voice.
+                    for segment in segments:
+                        segment.speaker = narrator_speaker
             except ValueError:
                 raise
             except Exception as exc:

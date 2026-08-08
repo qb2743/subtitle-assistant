@@ -9,6 +9,8 @@ from pathlib import Path
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
 
+from .video_rate import RatePlan, map_source_interval
+
 # On Windows, suppress "Application Error" crash dialogs for ffmpeg/ffprobe
 _SUBPROCESS_KWARGS: dict = {}
 if sys.platform == "win32":
@@ -88,7 +90,9 @@ def create_timeline_audio(
     volume: float = 1.0,
 ) -> None:
     """Place segment audio files on a silent timeline."""
-    timeline = AudioSegment.silent(duration=max(duration_ms, 1), frame_rate=48000)
+    timeline = AudioSegment.silent(
+        duration=max(duration_ms, 1), frame_rate=48000
+    ).set_channels(2)
     gain_db = _linear_to_db(volume)
     for audio_path, start_ms in segments:
         clip = AudioSegment.from_file(audio_path)
@@ -99,6 +103,73 @@ def create_timeline_audio(
     fmt = "mp3" if suffix == "mp3" else "wav"
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     timeline.export(output_path, format=fmt)
+
+
+def overlay_source_audio_intervals(
+    source_path: str,
+    output_path: str,
+    intervals: list[tuple[int, int]],
+    rate_plan: RatePlan | None = None,
+    blocking_intervals: list[tuple[int, int]] | None = None,
+) -> None:
+    """Overlay protected source audio, including gaps before narration resumes."""
+    bridge_gaps = blocking_intervals is not None
+    blockers: list[tuple[int, int]] = []
+    for raw_start, raw_end in blocking_intervals or []:
+        start, end = max(0, int(raw_start)), max(0, int(raw_end))
+        if end > start:
+            blockers.append((start, end))
+    blockers.sort()
+
+    merged: list[tuple[int, int]] = []
+    for raw_start, raw_end in sorted(intervals):
+        start, end = max(0, int(raw_start)), max(0, int(raw_end))
+        if end <= start:
+            continue
+        if merged:
+            previous_end = merged[-1][1]
+            gap_has_blocker = any(
+                block_start < start and block_end > previous_end
+                for block_start, block_end in blockers
+            )
+            if start <= previous_end or (bridge_gaps and not gap_has_blocker):
+                merged[-1] = (merged[-1][0], max(previous_end, end))
+                continue
+        merged.append((start, end))
+    if not merged:
+        return
+
+    source = AudioSegment.from_file(source_path)
+    output = AudioSegment.from_file(output_path)
+    for start, end in merged:
+        if bridge_gaps:
+            next_block_start = next(
+                (
+                    block_start
+                    for block_start, block_end in blockers
+                    if block_end > end
+                ),
+                len(source),
+            )
+            end = min(len(source), max(end, next_block_start))
+        clip = source[start:end]
+        if not clip:
+            continue
+        target_start = (
+            map_source_interval(rate_plan, start, end)[0]
+            if rate_plan is not None
+            else start
+        )
+        required_duration = target_start + len(clip)
+        if required_duration > len(output):
+            output += AudioSegment.silent(
+                duration=required_duration - len(output),
+                frame_rate=output.frame_rate,
+            )
+        output = output.overlay(clip, position=target_start)
+
+    suffix = Path(output_path).suffix.lower().lstrip(".")
+    output.export(output_path, format="mp3" if suffix == "mp3" else "wav")
 
 
 def mux_dubbed_audio(
@@ -116,7 +187,8 @@ def mux_dubbed_audio(
         filter_complex = (
             f"[0:a]volume={original_audio_volume}[a0];"
             f"[1:a]volume={dubbed_audio_volume}[a1];"
-            "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0[a]"
+            "[a0][a1]amix=inputs=2:duration=longest:"
+            "dropout_transition=0:normalize=0[a]"
         )
         cmd = [
             "ffmpeg",

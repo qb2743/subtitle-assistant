@@ -6,10 +6,16 @@ from pathlib import Path
 from typing import Any
 
 from videocaptioner.core.asr.asr_data import ASRData
+from videocaptioner.core.diarization.assign import (
+    read_speaker_json,
+    speaker_sidecar_path,
+)
+from videocaptioner.core.utils.logger import setup_logger
 
 from .models import DubbingSegment
 
 _BRACKET_SPEAKER_RE = re.compile(r"^\s*[\[\(【](?P<speaker>[^\]\)】]{1,40})[\]\)】]\s*(?P<text>.+)$", re.S)
+logger = setup_logger("dubbing_subtitle_parser")
 
 
 def load_dubbing_segments(path: str, *, text_track: str = "auto") -> list[DubbingSegment]:
@@ -26,7 +32,11 @@ def load_dubbing_segments(path: str, *, text_track: str = "auto") -> list[Dubbin
     """
     subtitle_path = Path(path)
     if subtitle_path.suffix.lower() == ".json":
-        return _from_json(json.loads(subtitle_path.read_text(encoding="utf-8")), text_track)
+        segments = _from_json(
+            json.loads(subtitle_path.read_text(encoding="utf-8")), text_track
+        )
+        _apply_speaker_sidecar(subtitle_path, segments)
+        return segments
 
     asr_data = ASRData.from_subtitle_file(path)
     segments: list[DubbingSegment] = []
@@ -43,7 +53,30 @@ def load_dubbing_segments(path: str, *, text_track: str = "auto") -> list[Dubbin
                     text=text.strip(),
                 )
             )
+    _apply_speaker_sidecar(subtitle_path, segments)
     return segments
+
+
+def _apply_speaker_sidecar(
+    subtitle_path: Path, segments: list[DubbingSegment]
+) -> None:
+    """Apply a parallel speaker sidecar without exposing labels in subtitle text."""
+    sidecar = speaker_sidecar_path(subtitle_path)
+    labels = read_speaker_json(sidecar)
+    if not labels:
+        return
+    if len(labels) != len(segments):
+        logger.warning(
+            "Ignoring speaker sidecar %s: %d labels for %d subtitle rows",
+            sidecar,
+            len(labels),
+            len(segments),
+        )
+        return
+    for segment, raw_label in zip(segments, labels):
+        label = raw_label.strip() if isinstance(raw_label, str) else ""
+        if label and segment.speaker == "default":
+            segment.speaker = label
 
 
 def split_speaker(text: str) -> tuple[str, str]:

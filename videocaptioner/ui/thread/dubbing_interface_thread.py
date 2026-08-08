@@ -50,6 +50,8 @@ class DubbingInterfaceThread(QThread):
         output_path: str = None,
         video_path: str = None,
         config_override=None,
+        display_subtitle_path: str | None = None,
+        protected_subtitle_path: str | None = None,
     ):
         """初始化配音线程
 
@@ -58,6 +60,8 @@ class DubbingInterfaceThread(QThread):
             input_data: 字幕文件路径（subtitle模式）或文案文本（text模式）
             output_path: 输出路径（可选，自动生成）
             video_path: 可选视频文件路径（用于视频变速 / 硬字幕烧录）
+            display_subtitle_path: 只显示、不参与配音的字幕轨
+            protected_subtitle_path: 保持原速的源时间轴字幕轨
         """
         super().__init__()
         self.input_mode = input_mode
@@ -65,6 +69,8 @@ class DubbingInterfaceThread(QThread):
         self.output_path = output_path
         self.video_path = video_path
         self.config_override = config_override
+        self.display_subtitle_path = display_subtitle_path
+        self.protected_subtitle_path = protected_subtitle_path
         self._cancelled = False
 
     def run(self):
@@ -124,6 +130,8 @@ class DubbingInterfaceThread(QThread):
             subtitle_path=subtitle_path,
             output_audio_path=self.output_path,
             video_path=self.video_path,
+            display_subtitle_path=self.display_subtitle_path,
+            protected_subtitle_path=self.protected_subtitle_path,
             callback=self._on_pipeline_progress,
         )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import threading
@@ -9,10 +10,17 @@ from pathlib import Path
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from videocaptioner.core.asr.asr_data import ASRData
+from videocaptioner.core.asr.asr_data import ASRData, ASRDataSeg
+from videocaptioner.core.diarization.assign import (
+    remap_speakers_ms,
+    speaker_sidecar_path,
+    write_speaker_json,
+)
+from videocaptioner.core.dubbing.models import DubbingSegment
 from videocaptioner.core.dubbing.narrator_filter import filter_narrator_subtitles
 from videocaptioner.core.dubbing.subtitle_parser import load_dubbing_segments
 from videocaptioner.core.entities import SubtitleLayoutEnum, TranscribeTask
+from videocaptioner.core.split.split import SubtitleSplitter, preprocess_segments
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.dubbing_config_builder import diarization_language_from_transcribe
@@ -64,8 +72,99 @@ def _write_dubbing_subtitle(path: Path, subtitle_data: dict) -> Path:
     return path
 
 
+def _write_dubbing_speaker_sidecar(
+    path: Path,
+    subtitle_data: dict,
+    source_intervals: list[tuple[int, int]],
+    source_speakers: list[str],
+    narrator_speaker: str = "",
+) -> Path | None:
+    """Map source speaker metadata onto the final edited subtitle timeline."""
+    sidecar = speaker_sidecar_path(path)
+    if not subtitle_data or not source_intervals or not source_speakers:
+        sidecar.unlink(missing_ok=True)
+        return None
+
+    final_data = ASRData.from_json(subtitle_data)
+    target_intervals = [
+        (segment.start_time, segment.end_time) for segment in final_data.segments
+    ]
+    forced_speaker = str(narrator_speaker or "").strip()
+    if forced_speaker:
+        labels = [forced_speaker] * len(target_intervals)
+    else:
+        labels = remap_speakers_ms(
+            source_intervals,
+            source_speakers,
+            target_intervals,
+        )
+    write_speaker_json(labels, sidecar)
+    return sidecar
+
+
 def _narrator_review_path(source_subtitle: Path) -> Path:
     return source_subtitle.with_name(source_subtitle.stem + "-narrator-review.json")
+
+
+def _narrator_dropped_path(source_subtitle: Path) -> Path:
+    return source_subtitle.with_name(source_subtitle.stem + "-narrator-dropped.srt")
+
+
+def _merge_word_level_segments(
+    segments: list[DubbingSegment],
+    speakers: list[str],
+    *,
+    max_cjk: int = 25,
+    max_words: int = 18,
+) -> tuple[list[DubbingSegment], list[str]]:
+    """Merge word timestamps into reviewable utterances without crossing speakers."""
+    if not segments:
+        return [], []
+    word_data = ASRData(
+        [ASRDataSeg(seg.text, seg.start_ms, seg.end_ms) for seg in segments]
+    )
+    if not word_data.is_word_timestamp():
+        return segments, list(speakers)
+
+    labels = [str(value or "").strip() for value in speakers]
+    labels.extend([""] * (len(segments) - len(labels)))
+    merged: list[DubbingSegment] = []
+    merged_speakers: list[str] = []
+    splitter = SubtitleSplitter(
+        thread_num=1,
+        model="",
+        max_word_count_cjk=max_cjk,
+        max_word_count_english=max_words,
+    )
+    try:
+        group_start = 0
+        while group_start < len(segments):
+            speaker = labels[group_start]
+            group_end = group_start + 1
+            while group_end < len(segments) and labels[group_end] == speaker:
+                group_end += 1
+            source = preprocess_segments(
+                [
+                    ASRDataSeg(segment.text, segment.start_ms, segment.end_ms)
+                    for segment in segments[group_start:group_end]
+                ],
+                need_lower=False,
+            )
+            for sentence in splitter._process_by_rules(source):
+                merged.append(
+                    DubbingSegment(
+                        index=len(merged) + 1,
+                        start_ms=sentence.start_time,
+                        end_ms=sentence.end_time,
+                        text=sentence.text.strip(),
+                        speaker=speaker or "default",
+                    )
+                )
+                merged_speakers.append(speaker)
+            group_start = group_end
+    finally:
+        splitter.stop()
+    return merged, merged_speakers
 
 
 def _load_pending_narrator_restores(source_subtitle: Path) -> set[int]:
@@ -88,9 +187,7 @@ def _save_narrator_review_artifacts(
 ) -> Path:
     """Persist the actual deleted rows so they can be reviewed after the run."""
     review_path = _narrator_review_path(source_subtitle)
-    dropped_path = source_subtitle.with_name(
-        source_subtitle.stem + "-narrator-dropped.srt"
-    )
+    dropped_path = _narrator_dropped_path(source_subtitle)
     payload = {
         "source_subtitle": str(source_subtitle),
         "filtered_subtitle": str(filtered_subtitle),
@@ -144,11 +241,19 @@ class VideoTranslationThread(QThread):
         self.subtitle_config = snapshot_task.subtitle_config
         if self.subtitle_config:
             self.subtitle_config.subtitle_action = self.subtitle_action
+        self.translate_original_subtitles = bool(
+            cfg.dubbing_translate_original_subtitles.value
+        )
         self._cancelled = False
         self._narrator_event = threading.Event()
         self._translation_event = threading.Event()
         self._narrator_restore: list[int] = []
         self._translation_data: dict = {}
+        self._speaker_source_intervals: list[tuple[int, int]] = []
+        self._speaker_source_labels: list[str] = []
+        self._narrator_speaker = ""
+        self._protected_subtitle_path: Path | None = None
+        self._display_subtitle_path: Path | None = None
         self._active_child = None
 
     def run(self):
@@ -217,7 +322,7 @@ class VideoTranslationThread(QThread):
             )
         subtitle_thread = SubtitleThread(subtitle_task)
         subtitle_result = self._run_child(
-            subtitle_thread, 25, 35, f"字幕{action_label}"
+            subtitle_thread, 25, 30, f"字幕{action_label}"
         )
         self._translation_data = subtitle_thread.result_data
         translated_path = Path(subtitle_result[1] if isinstance(subtitle_result, tuple) else subtitle_task.output_path)
@@ -231,6 +336,20 @@ class VideoTranslationThread(QThread):
                 return
 
         _write_dubbing_subtitle(translated_path, self._translation_data)
+        _write_dubbing_speaker_sidecar(
+            translated_path,
+            self._translation_data,
+            self._speaker_source_intervals,
+            self._speaker_source_labels,
+            self._narrator_speaker,
+        )
+
+        if self._protected_subtitle_path is not None:
+            self._display_subtitle_path = self._protected_subtitle_path
+            if self.translate_original_subtitles:
+                self._display_subtitle_path = self._translate_original_track(
+                    self._protected_subtitle_path
+                )
 
         self.progress.emit(60, "开始字幕配音与画面对齐...")
         config = TaskFactory.create_dubbing_config()
@@ -249,6 +368,16 @@ class VideoTranslationThread(QThread):
             input_data=str(translated_path),
             video_path=self.video_path,
             config_override=config,
+            display_subtitle_path=(
+                str(self._display_subtitle_path)
+                if self._display_subtitle_path is not None
+                else None
+            ),
+            protected_subtitle_path=(
+                str(self._protected_subtitle_path)
+                if self._protected_subtitle_path is not None
+                else None
+            ),
         )
         output = self._run_child(dub_thread, 60, 40, "配音与画面对齐")
         output_path = output[0] if isinstance(output, tuple) else output
@@ -287,7 +416,7 @@ class VideoTranslationThread(QThread):
     ) -> Path:
         self.progress.emit(20, "正在识别说话人...")
         from videocaptioner.core.diarization import diarize
-        from videocaptioner.core.diarization.assign import assign_speakers, write_speaker_json
+        from videocaptioner.core.diarization.assign import assign_speakers
 
         segments = load_dubbing_segments(str(source_subtitle), text_track="source")
         if not segments:
@@ -303,8 +432,36 @@ class VideoTranslationThread(QThread):
             cancelled=lambda: self._cancelled,
         )
         speakers = assign_speakers(segments, diarizations)
-        write_speaker_json(speakers, str(source_subtitle.with_suffix(".speaker.json")))
-        kept, report = filter_narrator_subtitles(segments, speakers)
+        source_speakers = list(speakers)
+        if narrator_only:
+            segments, speakers = _merge_word_level_segments(
+                segments,
+                speakers,
+                max_cjk=int(getattr(self.subtitle_config, "max_word_count_cjk", 25) or 25),
+                max_words=int(
+                    getattr(self.subtitle_config, "max_word_count_english", 18) or 18
+                ),
+            )
+        for segment, speaker in zip(segments, speakers):
+            segment.speaker = str(speaker or "").strip() or "default"
+        self._speaker_source_intervals = [
+            (segment.start_ms, segment.end_ms) for segment in segments
+        ]
+        self._speaker_source_labels = list(speakers)
+        try:
+            write_speaker_json(source_speakers, speaker_sidecar_path(source_subtitle))
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("说话人标签文件写入失败,已继续处理: %s", exc)
+        kept, report = filter_narrator_subtitles(
+            segments,
+            speakers,
+            keep_same_lang=False,
+        )
+        self._narrator_speaker = (
+            str(report.get("narrator_speaker_id") or "").strip()
+            if narrator_only
+            else ""
+        )
         dropped = report.get("dropped", [])
         llm_details: dict[int, dict] = {}
 
@@ -331,7 +488,11 @@ class VideoTranslationThread(QThread):
                     item["llm_label"] = detail.get("label", "")
                     item["llm_reason"] = detail.get("reason", "")
                 restored_indices = {
-                    dropped[i]["index"] for i in restored if i < len(dropped)
+                    dropped[i]["index"]
+                    for i in restored
+                    if isinstance(i, int)
+                    and not isinstance(i, bool)
+                    and 0 <= i < len(dropped)
                 }
                 kept = sorted(set(kept) | restored_indices)
                 if restored_indices:
@@ -363,7 +524,12 @@ class VideoTranslationThread(QThread):
             self._narrator_event.clear()
             self.narrator_review_required.emit(report, dropped)
             self._wait_for_review(self._narrator_event, "解说字幕")
-            human_restored = set(self._narrator_restore)
+            reviewable_indices = {int(item["index"]) for item in dropped}
+            human_restored = {
+                int(index)
+                for index in self._narrator_restore
+                if isinstance(index, int) and not isinstance(index, bool)
+            } & reviewable_indices
             kept = sorted(set(kept) | human_restored)
             dropped = [
                 item for item in dropped if item["index"] not in human_restored
@@ -380,15 +546,48 @@ class VideoTranslationThread(QThread):
         if not narrator_only:
             return source_subtitle
 
-        asr_data = ASRData.from_subtitle_file(str(source_subtitle))
+        asr_data = ASRData(
+            [
+                ASRDataSeg(segment.text, segment.start_ms, segment.end_ms)
+                for segment in segments
+            ]
+        )
         selected = [asr_data.segments[i] for i in kept if i < len(asr_data.segments)]
         filtered_path = source_subtitle.with_name(source_subtitle.stem + "-narrator.srt")
         ASRData(selected).to_srt(save_path=str(filtered_path))
         review_path = _save_narrator_review_artifacts(
             source_subtitle, filtered_path, report, dropped, asr_data
         )
+        self._protected_subtitle_path = _narrator_dropped_path(source_subtitle)
         self.narrator_review_saved.emit(str(review_path))
         return filtered_path
+
+    def _translate_original_track(self, source_path: Path) -> Path:
+        if not source_path.is_file() or not load_dubbing_segments(str(source_path)):
+            return source_path
+        subtitle_task = TaskFactory.create_subtitle_task(
+            str(source_path), self.video_path, need_next_task=False
+        )
+        subtitle_task.output_path = str(
+            source_path.with_name(source_path.stem + "-translated.srt")
+        )
+        subtitle_task.subtitle_config = copy.deepcopy(self.subtitle_config)
+        if subtitle_task.subtitle_config is None:
+            raise RuntimeError("原片字幕翻译配置不可用")
+        subtitle_task.subtitle_config.subtitle_action = "translate"
+        subtitle_task.subtitle_config.need_translate = True
+        subtitle_task.subtitle_config.need_optimize = False
+        subtitle_task.subtitle_config.subtitle_layout = SubtitleLayoutEnum.ONLY_TRANSLATE
+        subtitle_thread = SubtitleThread(subtitle_task)
+        result = self._run_child(subtitle_thread, 55, 5, "原片字幕翻译")
+        translated_path = Path(
+            result[1] if isinstance(result, tuple) else subtitle_task.output_path
+        )
+        if subtitle_thread.result_data:
+            _write_dubbing_subtitle(translated_path, subtitle_thread.result_data)
+        if not translated_path.is_file():
+            raise RuntimeError("原片字幕翻译未生成字幕文件")
+        return translated_path
 
     @staticmethod
     def _wait_for_review(event: threading.Event, stage: str) -> None:

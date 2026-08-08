@@ -75,7 +75,8 @@ def build_mix_command(
         parts.append(f"[{i}:a]volume={volume:.3f}[a{i}]")
     mix_in = "[0:a]" + "".join(f"[a{i}]" for i in range(1, n_inputs))
     parts.append(
-        f"{mix_in}amix=inputs={n_inputs}:duration=first:dropout_transition=2[a]"
+        f"{mix_in}amix=inputs={n_inputs}:duration=first:"
+        "dropout_transition=2:normalize=0[a]"
     )
     cmd += ["-filter_complex", ";".join(parts)]
     cmd += [

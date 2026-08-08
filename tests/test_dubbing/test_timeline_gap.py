@@ -4,7 +4,9 @@ from videocaptioner.core.dubbing.models import DubbingSegment
 from videocaptioner.core.dubbing.timeline import (
     compute_timeline_placements,
     write_adjusted_subtitle,
+    write_composite_subtitle,
 )
+from videocaptioner.core.dubbing.video_rate import compute_rate_plan
 
 
 def test_gap_zero_keeps_original_timeline():
@@ -54,3 +56,31 @@ def test_write_adjusted_subtitle(tmp_path):
     assert "00:00:01,500 --> 00:00:02,000" in content
     assert "Hello" in content
     assert "World" in content
+
+
+def test_write_composite_subtitle_maps_display_only_track(tmp_path):
+    dubbed = [
+        DubbingSegment(index=1, start_ms=0, end_ms=1000, text="Narration one"),
+        DubbingSegment(index=2, start_ms=3000, end_ms=4000, text="Narration two"),
+    ]
+    original = [
+        DubbingSegment(index=1, start_ms=1000, end_ms=3000, text="Original dialogue")
+    ]
+    plan, placements, _extra = compute_rate_plan(
+        [(0, 1000), (3000, 4000)],
+        [2000, 500],
+        0,
+        4000,
+        2.0,
+        locked_slots=[(1000, 3000)],
+    )
+    output = tmp_path / "composite.srt"
+
+    write_composite_subtitle(
+        dubbed, placements, original, str(output), rate_plan=plan
+    )
+
+    content = output.read_text(encoding="utf-8")
+    assert "00:00:02,000 --> 00:00:04,000\nOriginal dialogue" in content
+    assert content.index("Narration one") < content.index("Original dialogue")
+    assert content.index("Original dialogue") < content.index("Narration two")

@@ -74,8 +74,7 @@ def test_majority_speaker_kept_other_dropped():
     kept, report = filter_narrator_subtitles(subs, speakers)
     assert kept == [0, 1, 2]
     assert report["dropped_count"] == 1
-    # keep_same_lang=True 且该行为英文 → reason 带语种后缀。
-    assert report["dropped"][0]["reason"] == "other_speaker_lang_en"
+    assert report["dropped"][0]["reason"] == "other_speaker"
     assert report["narrator_speaker_id"] == "spk0"
 
 
@@ -112,6 +111,31 @@ def test_close_race_between_top_two_triggers_review():
 # ------------------------------------------------------------ same-lang rescue
 
 
+def test_default_strict_filter_drops_same_language_dialogue():
+    # 文本语种不能覆盖说话人结果：同为中文的 spk1 原片对白仍应进入严格删除集。
+    subs = [
+        seg(1, 0, 2000, "眼前这位男子正准备离开房间"),
+        seg(2, 2000, 3000, "你到底要去哪里"),
+    ]
+    speakers = ["spk0", "spk1"]
+
+    kept, report = filter_narrator_subtitles(subs, speakers)
+
+    assert kept == [0]
+    assert report["keep_same_lang"] is False
+    assert report["kept_by_lang"] == 0
+    assert report["dropped"] == [
+        {
+            "index": 1,
+            "start_time": 2000,
+            "end_time": 3000,
+            "speaker": "spk1",
+            "reason": "other_speaker",
+            "text": "你到底要去哪里",
+        }
+    ]
+
+
 def test_keep_same_lang_rescues_mislabeled_narrator():
     # 主说话人 spk0(2000ms, 中文);spk1 也是中文(500ms)→ 同语救回,保留。
     subs = [
@@ -126,7 +150,7 @@ def test_keep_same_lang_rescues_mislabeled_narrator():
     assert report["kept_by_lang"] == 1
 
 
-def test_keep_same_lang_off_drops_other_lang():
+def test_keep_same_lang_does_not_rescue_different_language():
     # spk0 时长更长(2000ms)为主说话人;spk1 是英文,与中文解说不同语 → 删除。
     subs = [
         seg(1, 0, 2000, "这是解说的开场白内容"),

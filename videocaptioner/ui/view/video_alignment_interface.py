@@ -9,7 +9,6 @@ from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -23,7 +22,6 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     DoubleSpinBox,
-    FluentStyleSheet,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -36,8 +34,8 @@ from qfluentwidgets import (
     SpinBox,
     SubtitleLabel,
     SwitchButton,
+    TableWidget,
     ToolButton,
-    isDarkTheme,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -75,6 +73,8 @@ from videocaptioner.ui.dubbing_config_builder import (
     dubbing_model_options,
     resolve_dubbing_model,
     resolve_dubbing_voice,
+    speaker_voice_map_for_provider,
+    update_speaker_voice_map,
 )
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.video_info_thread import VideoInfoThread
@@ -153,6 +153,12 @@ def alignment_voice_options(
             unique.append((name, voice))
             seen.add(voice)
     return unique
+
+
+def speaker_ids_for_count(speaker_count: int) -> list[str]:
+    """Return visible diarization roles; automatic detection is capped at six."""
+    count = speaker_count if speaker_count > 0 else 6
+    return [f"spk{index}" for index in range(count)]
 
 
 def _multilingual_diarization_model_path() -> Path:
@@ -370,7 +376,7 @@ def _review_srt_text(dropped: list[dict]) -> str:
     return "\n".join(lines)
 
 
-class NarratorReviewDialog(QDialog):
+class NarratorReviewDialog(MessageBoxBase):
     """说话人过滤后的删除字幕复核。"""
 
     def __init__(
@@ -386,36 +392,10 @@ class NarratorReviewDialog(QDialog):
         self.dropped = dropped
         self.saved_review = saved_review
         preselected = preselected or set()
-        self.setWindowTitle("复核已删除字幕")
-        self.resize(980, 540)
-        FluentStyleSheet.FLUENT_WINDOW.apply(self)
-        if isDarkTheme():
-            self.setStyleSheet(
-                """
-                QDialog { background-color: #202020; color: #f2f2f2; }
-                QTableWidget {
-                    background-color: #2b2b2b;
-                    alternate-background-color: #303030;
-                    color: #f2f2f2;
-                    gridline-color: #454545;
-                    selection-background-color: #3a8f68;
-                    selection-color: #ffffff;
-                }
-                QHeaderView::section {
-                    background-color: #333333;
-                    color: #f2f2f2;
-                    border: 0;
-                    border-bottom: 1px solid #454545;
-                    padding: 5px;
-                }
-                QTableCornerButton::section {
-                    background-color: #333333;
-                    border: 0;
-                    border-bottom: 1px solid #454545;
-                }
-                """
-            )
-        self.table = QTableWidget(self)
+        self.widget.setMinimumSize(1100, 620)
+        self.viewLayout.addWidget(SubtitleLabel("复核已删除字幕", self.widget))
+        self.table = TableWidget(self.widget)
+        self.table.setMinimumHeight(430)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -459,34 +439,31 @@ class NarratorReviewDialog(QDialog):
             if saved_review
             else "勾选需要恢复的字幕。"
         )
-        summary = BodyLabel(summary_text, self)
-        self.continue_btn = PrimaryPushButton(
-            FIF.ACCEPT,
-            "保存下次恢复项" if saved_review else "恢复选中并继续",
-            self,
+        summary = BodyLabel(summary_text, self.widget)
+        self.continue_btn = self.yesButton
+        self.continue_btn.setIcon(FIF.ACCEPT)
+        self.continue_btn.setText(
+            "保存下次恢复项" if saved_review else "恢复选中并继续"
         )
-        self.continue_btn.clicked.connect(self.accept)
-        cancel = PushButton(
-            FIF.CANCEL, "关闭" if saved_review else "全部保留当前筛选", self
-        )
-        cancel.clicked.connect(self.reject)
-        select_all = PushButton("全选", self)
+        cancel = self.cancelButton
+        cancel.setIcon(FIF.CANCEL.icon())
+        cancel.setText("关闭" if saved_review else "全部保留当前筛选")
+        select_all = PushButton("全选", self.widget)
         select_all.clicked.connect(lambda: self._set_all_checked(True))
-        select_none = PushButton("全不选", self)
+        select_none = PushButton("全不选", self.widget)
         select_none.clicked.connect(lambda: self._set_all_checked(False))
-        export = PushButton(FIF.SAVE, "导出删除字幕", self)
+        export = PushButton(FIF.SAVE, "导出删除字幕", self.widget)
         export.clicked.connect(self._export_dropped)
-        buttons = QHBoxLayout()
-        buttons.addWidget(select_all)
-        buttons.addWidget(select_none)
-        buttons.addWidget(export)
-        buttons.addStretch()
-        buttons.addWidget(cancel)
-        buttons.addWidget(self.continue_btn)
-        layout = QVBoxLayout(self)
-        layout.addWidget(summary)
-        layout.addWidget(self.table)
-        layout.addLayout(buttons)
+        self.buttonLayout.removeWidget(self.continue_btn)
+        self.buttonLayout.removeWidget(cancel)
+        self.buttonLayout.addWidget(select_all)
+        self.buttonLayout.addWidget(select_none)
+        self.buttonLayout.addWidget(export)
+        self.buttonLayout.addStretch()
+        self.buttonLayout.addWidget(cancel)
+        self.buttonLayout.addWidget(self.continue_btn)
+        self.viewLayout.addWidget(summary)
+        self.viewLayout.addWidget(self.table)
         if not saved_review:
             self._remaining_seconds = REVIEW_TIMEOUT_SECONDS
             self._countdown_timer = QTimer(self)
@@ -525,6 +502,64 @@ class NarratorReviewDialog(QDialog):
             for row in range(self.table.rowCount())
             if self.table.item(row, 0).checkState() == Qt.Checked
         ]
+
+
+class SpeakerVoiceMappingDialog(MessageBoxBase):
+    """Map diarized speaker ids to voices for one TTS provider."""
+
+    def __init__(
+        self,
+        provider: str,
+        speakers: list[str],
+        voice_options: list[tuple[str, str]],
+        mapping: dict[str, str],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.widget.setMinimumWidth(560)
+        self.yesButton.setText("保存")
+        self.cancelButton.setText("取消")
+        self._voice_combos: dict[str, ComboBox] = {}
+
+        self.viewLayout.addWidget(SubtitleLabel("角色音色", self))
+        self.viewLayout.addWidget(
+            BodyLabel(
+                f"当前配音渠道：{provider}。未单独指定的角色会跟随全局音色。",
+                self,
+            )
+        )
+
+        table = QTableWidget(len(speakers), 2, self)
+        table.setHorizontalHeaderLabels(["说话人", "音色"])
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.verticalHeader().hide()
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 110)
+        table.setFixedHeight(42 + 42 * len(speakers))
+        for row, speaker in enumerate(speakers):
+            table.setItem(row, 0, QTableWidgetItem(speaker))
+            combo = ComboBox(table)
+            combo.addItem("跟随默认音色", userData="")
+            option_ids = set()
+            for name, voice in voice_options:
+                combo.addItem(name, userData=voice)
+                option_ids.add(voice)
+            saved_voice = mapping.get(speaker, "")
+            if saved_voice and saved_voice not in option_ids:
+                combo.addItem(f"当前配置 - {saved_voice}", userData=saved_voice)
+            index = combo.findData(saved_voice)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            table.setCellWidget(row, 1, combo)
+            self._voice_combos[speaker] = combo
+        self.viewLayout.addWidget(table)
+
+    def voice_map(self) -> dict[str, str]:
+        return {
+            speaker: str(combo.currentData())
+            for speaker, combo in self._voice_combos.items()
+            if combo.currentData()
+        }
 
 
 class VideoAlignmentInterface(QWidget):
@@ -664,7 +699,23 @@ class VideoAlignmentInterface(QWidget):
         diarization_row.addWidget(self.diarization_model_btn)
         options_left.addLayout(diarization_row)
         self.speaker_count_combo = self._combo_row(options_left, "说话人数上限", [("不限（自动）", 0), *( (f"{n} 人", n) for n in (2, 3, 4, 5, 6))])
+        speaker_voice_row = QHBoxLayout()
+        speaker_voice_row.addWidget(BodyLabel("角色音色:", self))
+        speaker_voice_row.addStretch()
+        self.speaker_voice_btn = PushButton(FIF.SPEAKERS, "配置", self)
+        self.speaker_voice_btn.setToolTip("为识别出的不同说话人分配音色")
+        self.speaker_voice_btn.clicked.connect(self._show_speaker_voice_dialog)
+        speaker_voice_row.addWidget(self.speaker_voice_btn)
+        options_left.addLayout(speaker_voice_row)
         self.narrator_only_switch = self._switch_row(options_left, "仅保留解说", bool(cfg.dubbing_narrator_only.value))
+        self.translate_original_subtitles_switch = self._switch_row(
+            options_left,
+            "翻译原片字幕",
+            bool(cfg.dubbing_translate_original_subtitles.value),
+        )
+        self.translate_original_subtitles_switch.setToolTip(
+            "只翻译被解说筛选排除的原片对白字幕；不配音，也不参与画面变速对齐"
+        )
         manual_review_row = QHBoxLayout()
         manual_review_row.addWidget(BodyLabel("删除字幕复核:", self))
         manual_review_row.addStretch()
@@ -762,7 +813,8 @@ class VideoAlignmentInterface(QWidget):
             self.tts_model_combo, self.tts_voice_combo,
             self.optimize_switch, self.split_switch, self.max_cjk_spin,
             self.max_words_spin, self.diarization_switch, self.speaker_count_combo,
-            self.narrator_only_switch, self.llm_review_switch,
+            self.narrator_only_switch, self.translate_original_subtitles_switch,
+            self.llm_review_switch,
             self.video_autorate_switch, self.random_mirror_switch, self.random_color_switch,
             self.canvas_combo, self.embed_combo, self.gap_ms_spin,
             self.dubbed_gain_spin,
@@ -879,6 +931,47 @@ class VideoAlignmentInterface(QWidget):
         if self._diarization_model_dialog is None:
             self._diarization_model_dialog = DiarizationModelDownloadDialog(self)
         self._diarization_model_dialog.exec_()
+
+    def _show_speaker_voice_dialog(self):
+        provider = self._tts_provider_id()
+        options = [
+            (name, voice)
+            for name, voice in alignment_voice_options(
+                provider, self.target_language_combo.currentData()
+            )
+            if voice
+        ]
+        if len({voice for _name, voice in options}) < 2:
+            self._warn(
+                "当前渠道无法配置角色音色",
+                "该配音渠道没有至少两个可选音色，请先切换渠道或在“配音”面板添加音色。",
+            )
+            return
+
+        mapping = speaker_voice_map_for_provider(
+            cfg.dubbing_speaker_voice_map.value, provider
+        )
+        speakers = speaker_ids_for_count(
+            int(self.speaker_count_combo.currentData() or 0)
+        )
+        dialog = SpeakerVoiceMappingDialog(
+            provider, speakers, options, mapping, self
+        )
+        if not dialog.exec_():
+            return
+        cfg.dubbing_speaker_voice_map.value = update_speaker_voice_map(
+            cfg.dubbing_speaker_voice_map.value,
+            provider,
+            dialog.voice_map(),
+        )
+        cfg.save()
+        InfoBar.success(
+            title="角色音色已保存",
+            content=f"已更新 {provider} 的角色音色配置",
+            duration=3000,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
 
     def _requires_multilingual_diarization(self) -> bool:
         language = diarization_language_from_transcribe(
@@ -1057,6 +1150,9 @@ class VideoAlignmentInterface(QWidget):
         cfg.dubbing_enable_diarization.value = self.diarization_switch.isChecked()
         cfg.dubbing_speaker_count.value = int(self.speaker_count_combo.currentData() or 0)
         cfg.dubbing_narrator_only.value = self.narrator_only_switch.isChecked()
+        cfg.dubbing_translate_original_subtitles.value = (
+            self.translate_original_subtitles_switch.isChecked()
+        )
         cfg.dubbing_narrator_llm_review.value = self.llm_review_switch.isChecked()
         cfg.dubbing_video_autorate.value = self.video_autorate_switch.isChecked()
         cfg.dubbing_random_mirror.value = self.random_mirror_switch.isChecked()
@@ -1080,7 +1176,12 @@ class VideoAlignmentInterface(QWidget):
         enabled = self.diarization_switch.isChecked()
         self.speaker_count_combo.setEnabled(enabled)
         self.narrator_only_switch.setEnabled(enabled)
-        self.llm_review_switch.setEnabled(enabled and self.narrator_only_switch.isChecked())
+        self.speaker_voice_btn.setEnabled(
+            enabled and not self.narrator_only_switch.isChecked()
+        )
+        narrator_enabled = enabled and self.narrator_only_switch.isChecked()
+        self.translate_original_subtitles_switch.setEnabled(narrator_enabled)
+        self.llm_review_switch.setEnabled(narrator_enabled)
         bgm_enabled = self.embed_bgm_switch.isChecked() or bool(
             self.extra_bgm_edit.text().strip()
         )

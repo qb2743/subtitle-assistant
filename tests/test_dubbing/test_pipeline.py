@@ -4,7 +4,13 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
-from videocaptioner.core.dubbing import DubbingConfig, DubbingPipeline
+from videocaptioner.core.diarization.assign import write_speaker_json
+from videocaptioner.core.dubbing import (
+    DubbingConfig,
+    DubbingPipeline,
+    DubbingSegment,
+    SpeakerProfile,
+)
 from videocaptioner.core.dubbing.models import elevenlabs_concurrent_per_key
 from videocaptioner.core.dubbing.pipeline import default_dubbed_audio_path, resolve_tts_worker_count
 from videocaptioner.core.entities import SubtitleLayoutEnum, SubtitleRenderModeEnum
@@ -106,6 +112,10 @@ def test_dubbing_pipeline_creates_timeline_audio(tmp_path, monkeypatch):
         base_url="",
         model="gemini-3.1-flash-tts-preview",
         voice="Kore",
+        speaker_profiles={
+            "Alice": SpeakerProfile(name="Alice", voice="Aoede"),
+            "Bob": SpeakerProfile(name="Bob", voice="Puck"),
+        },
     )
     result = DubbingPipeline(config).run(str(srt), str(output), work_dir=str(tmp_path / "parts"))
 
@@ -114,7 +124,53 @@ def test_dubbing_pipeline_creates_timeline_audio(tmp_path, monkeypatch):
     assert len(result.segments) == 2
     assert result.segments[0].speaker == "Alice"
     assert result.segments[1].speaker == "Bob"
+    assert [segment.voice for segment in result.segments] == ["Aoede", "Puck"]
     assert not output.with_suffix(".dubbing.json").exists()
+
+
+def test_speaker_sidecar_profiles_reach_tts_requests(tmp_path, monkeypatch):
+    srt = tmp_path / "translated.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nFirst line\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nSecond line\n",
+        encoding="utf-8",
+    )
+    write_speaker_json(["spk0", "spk1"], tmp_path / "translated.speaker.json")
+    captured_requests = []
+
+    class CapturingSynthesizer(FakeSynthesizer):
+        def synthesize(self, request):
+            captured_requests.append((request.text, request.voice))
+            return super().synthesize(request)
+
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: CapturingSynthesizer(),
+    )
+    config = DubbingConfig(
+        provider="gemini",
+        api_key="test",
+        base_url="",
+        model="gemini-3.1-flash-tts-preview",
+        voice="Kore",
+        speaker_profiles={
+            "spk0": SpeakerProfile(name="spk0", voice="Aoede"),
+            "spk1": SpeakerProfile(name="spk1", voice="Puck"),
+        },
+    )
+
+    result = DubbingPipeline(config).run(
+        str(srt),
+        str(tmp_path / "dub.wav"),
+        work_dir=str(tmp_path / "parts"),
+    )
+
+    assert [segment.speaker for segment in result.segments] == ["spk0", "spk1"]
+    assert [segment.voice for segment in result.segments] == ["Aoede", "Puck"]
+    assert dict(captured_requests) == {
+        "First line": "Aoede",
+        "Second line": "Puck",
+    }
 
 
 def test_extra_bgm_is_mixed_without_reembed_switch(tmp_path, monkeypatch):
@@ -426,11 +482,112 @@ def test_pipeline_real_video_filters_and_output_dir(tmp_path, monkeypatch):
     assert _video_dimensions(result.video_path) == (1080, 1920)
 
 
+def test_pipeline_diarization_assigns_role_profiles_before_tts(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "videocaptioner.core.diarization.diarize",
+        lambda *_args, **_kwargs: [
+            {"start": 0.0, "end": 1.0, "speaker": "spk0"},
+            {"start": 1.0, "end": 2.0, "speaker": "spk1"},
+        ],
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: FakeSynthesizer(),
+    )
+    config = DubbingConfig(
+        provider="gemini",
+        api_key="test",
+        base_url="",
+        model="gemini-3.1-flash-tts-preview",
+        voice="Kore",
+        enable_diarization=True,
+        speaker_profiles={
+            "spk0": SpeakerProfile(name="spk0", voice="Kore"),
+            "spk1": SpeakerProfile(name="spk1", voice="Puck"),
+        },
+    )
+    pipeline = DubbingPipeline(config)
+    segments = [
+        DubbingSegment(index=1, start_ms=0, end_ms=1000, text="One"),
+        DubbingSegment(index=2, start_ms=1000, end_ms=2000, text="Two"),
+    ]
+
+    result = pipeline._apply_diarization_and_narrator_filter(
+        segments,
+        "unused.mp4",
+        tmp_path / "dub.wav",
+        tmp_path,
+        lambda *_args: None,
+        [],
+    )
+    pipeline._apply_speakers(result)
+
+    assert [segment.speaker for segment in result] == ["spk0", "spk1"]
+    assert [segment.voice for segment in result] == ["Kore", "Puck"]
+
+
+def test_pipeline_keeps_strict_filter_when_review_artifact_writes_fail(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "videocaptioner.core.diarization.diarize",
+        lambda *_args, **_kwargs: [
+            {"start": 0.0, "end": 1.0, "speaker": "spk0"},
+            {"start": 1.0, "end": 2.0, "speaker": "spk1"},
+            {"start": 2.0, "end": 3.0, "speaker": "spk0"},
+        ],
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.diarization.assign.write_speaker_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("locked")),
+    )
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: FakeSynthesizer(),
+    )
+    pipeline = DubbingPipeline(
+        DubbingConfig(
+            provider="gemini",
+            api_key="test",
+            base_url="",
+            model="gemini-3.1-flash-tts-preview",
+            voice="Kore",
+            enable_diarization=True,
+            narrator_only=True,
+        )
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_write_dropped_subtitles",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("locked")),
+    )
+    segments = [
+        DubbingSegment(index=1, start_ms=0, end_ms=1000, text="Narrator one"),
+        DubbingSegment(index=2, start_ms=1000, end_ms=2000, text="Dialogue"),
+        DubbingSegment(index=3, start_ms=2000, end_ms=3000, text="Narrator two"),
+    ]
+    warnings = []
+
+    result = pipeline._apply_diarization_and_narrator_filter(
+        segments,
+        "unused.mp4",
+        tmp_path / "dub.wav",
+        tmp_path,
+        lambda *_args: None,
+        warnings,
+    )
+
+    assert [segment.text for segment in result] == ["Narrator one", "Narrator two"]
+    assert any("标签文件写入失败" in warning for warning in warnings)
+    assert any("删除字幕清单写入失败" in warning for warning in warnings)
+    assert not any("说话人识别失败" in warning for warning in warnings)
+
+
 def test_pipeline_diarization_writes_sidecars_and_llm_restores(tmp_path, monkeypatch):
     srt = tmp_path / "input.srt"
     srt.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n旁白一\n\n"
-        "2\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\n误标的旁白\n\n"
         "3\n00:00:02,000 --> 00:00:03,000\n旁白二\n",
         encoding="utf-8",
     )
@@ -438,6 +595,7 @@ def test_pipeline_diarization_writes_sidecars_and_llm_restores(tmp_path, monkeyp
     _make_test_video(video, duration=3)
     output_dir = tmp_path / "rendered"
     seen_languages = []
+    reviewed = {}
 
     def fake_diarize(
         audio_path,
@@ -456,9 +614,15 @@ def test_pipeline_diarization_writes_sidecars_and_llm_restores(tmp_path, monkeyp
         ]
 
     monkeypatch.setattr("videocaptioner.core.diarization.diarize", fake_diarize)
+
+    def fake_judge(kept_segments, dropped_segments, *_args, **_kwargs):
+        reviewed["kept"] = [segment.text for segment in kept_segments]
+        reviewed["dropped"] = [segment.text for segment in dropped_segments]
+        return [0]
+
     monkeypatch.setattr(
         "videocaptioner.core.dubbing.narrator_llm_judge.judge_dropped",
-        lambda *args, **kwargs: [0],
+        fake_judge,
     )
     monkeypatch.setattr(
         "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
@@ -477,6 +641,10 @@ def test_pipeline_diarization_writes_sidecars_and_llm_restores(tmp_path, monkeyp
         llm_api_key="llm-key",
         llm_api_base="https://example.invalid/v1",
         llm_model="test-model",
+        speaker_profiles={
+            "spk0": SpeakerProfile(name="spk0", voice="Kore"),
+            "spk1": SpeakerProfile(name="spk1", voice="Puck"),
+        },
         output_dir=str(output_dir),
     )
 
@@ -496,7 +664,15 @@ def test_pipeline_diarization_writes_sidecars_and_llm_restores(tmp_path, monkeyp
         "spk0",
     ]
     assert dropped_sidecar.is_file()
+    assert dropped_sidecar.read_text(encoding="utf-8") == ""
+    assert reviewed == {
+        "kept": ["旁白一", "旁白二"],
+        "dropped": ["误标的旁白"],
+    }
     assert len(result.segments) == 3
+    assert {segment.speaker for segment in result.segments} == {"spk0"}
+    assert {segment.voice for segment in result.segments} == {"Kore"}
+    assert not any("过滤删除" in warning for warning in result.warnings)
     assert result.video_path is not None and result.video_path.is_file()
 
 
@@ -536,3 +712,51 @@ def test_burn_subtitles_uses_configured_style(tmp_path, monkeypatch):
     assert calls[0][2] == SubtitleRenderModeEnum.ROUNDED_BG
     assert calls[0][3] == SubtitleLayoutEnum.ONLY_ORIGINAL
     assert calls[0][4]["rounded_style"] == {"font_size": 32}
+
+
+def test_display_only_subtitles_are_merged_but_never_sent_to_tts(
+    tmp_path, monkeypatch
+):
+    narrator = tmp_path / "narrator.srt"
+    narrator.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nNarration\n\n"
+        "2\n00:00:02,000 --> 00:00:03,000\nMore narration\n",
+        encoding="utf-8",
+    )
+    original = tmp_path / "original.srt"
+    original.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nOriginal dialogue\n",
+        encoding="utf-8",
+    )
+    captured = []
+
+    class CapturingSynthesizer(FakeSynthesizer):
+        def synthesize(self, request):
+            captured.append(request.text)
+            return super().synthesize(request)
+
+    monkeypatch.setattr(
+        "videocaptioner.core.dubbing.pipeline.create_speech_synthesizer",
+        lambda _config: CapturingSynthesizer(),
+    )
+    config = DubbingConfig(
+        provider="edge",
+        api_key="",
+        base_url="",
+        model="edge-tts",
+        voice="zh-CN-XiaoxiaoNeural",
+    )
+
+    result = DubbingPipeline(config).run(
+        str(narrator),
+        str(tmp_path / "dub.wav"),
+        display_subtitle_path=str(original),
+        protected_subtitle_path=str(original),
+        work_dir=str(tmp_path / "parts"),
+    )
+
+    assert captured == ["Narration", "More narration"]
+    assert result.adjusted_subtitle_path is not None
+    content = result.adjusted_subtitle_path.read_text(encoding="utf-8")
+    assert "Narration" in content
+    assert "Original dialogue" in content

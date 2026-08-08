@@ -8,6 +8,8 @@ from videocaptioner.core.diarization.assign import (
     assign_speakers,
     assign_speakers_ms,
     read_speaker_json,
+    remap_speakers_ms,
+    speaker_sidecar_path,
     write_speaker_json,
 )
 from videocaptioner.core.dubbing.models import DubbingSegment
@@ -104,6 +106,39 @@ def test_assign_speakers_millisecond_boundary_rounding():
     assert out == ["spk0"]
 
 
+# ------------------------------------------------------- timeline remapping
+
+
+def test_remap_speakers_survives_split_and_removed_rows():
+    out = remap_speakers_ms(
+        [(0, 1000), (1000, 2000), (2000, 3000)],
+        ["spk0", "spk1", "spk0"],
+        [(0, 400), (400, 1000), (2000, 3000)],
+    )
+
+    assert out == ["spk0", "spk0", "spk0"]
+
+
+def test_remap_speakers_uses_dominant_overlap_for_merged_row():
+    out = remap_speakers_ms(
+        [(0, 500), (500, 2000)],
+        ["spk0", "spk1"],
+        [(0, 2000)],
+    )
+
+    assert out == ["spk1"]
+
+
+def test_remap_speakers_ignores_unlabelled_source_rows():
+    out = remap_speakers_ms(
+        [(0, 1000), (1000, 2000)],
+        ["", "spk1"],
+        [(0, 1000), (1000, 2000)],
+    )
+
+    assert out == ["", "spk1"]
+
+
 # ------------------------------------------------------------ sidecar json
 
 
@@ -120,3 +155,12 @@ def test_read_speaker_json_missing_or_invalid(tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     assert read_speaker_json(bad) == []
+    invalid_encoding = tmp_path / "invalid-encoding.json"
+    invalid_encoding.write_bytes(b"\xff\xfe\xfa")
+    assert read_speaker_json(invalid_encoding) == []
+
+
+def test_speaker_sidecar_path_replaces_subtitle_suffix(tmp_path):
+    subtitle = tmp_path / "movie.translated.srt"
+
+    assert speaker_sidecar_path(subtitle) == tmp_path / "movie.translated.speaker.json"

@@ -28,7 +28,144 @@ def test_result_retries_transient_ssl_error(monkeypatch):
     assert get.call_count == 2
     assert get.call_args.kwargs["timeout"] == bcut_module.RESULT_REQUEST_TIMEOUT
     assert get.call_args.kwargs["params"]["task_id"] == "task-id"
+    assert (
+        get.call_args.kwargs["params"]["model_id"]
+        == bcut_module.BCUT_QUERY_MODEL_ID
+    )
     assert sleeps == [1]
+
+
+def test_result_retries_api_response_without_data(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    not_ready = Mock()
+    not_ready.json.return_value = {
+        "code": 9,
+        "message": "TaskidNotExists",
+        "ttl": 1,
+    }
+    completed = Mock()
+    completed.json.return_value = {"data": {"state": 4}}
+    get = Mock(side_effect=[not_ready, completed])
+    sleeps = []
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleeps.append)
+
+    assert asr.result() == {"state": 4}
+    assert get.call_count == 2
+    assert sleeps == [1]
+
+
+def test_result_reports_api_error_after_bounded_retries(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    response = Mock()
+    response.json.return_value = {
+        "code": 9,
+        "message": "TaskidNotExists",
+        "ttl": 1,
+    }
+    get = Mock(return_value=response)
+    sleeps = []
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(RuntimeError, match="code=9.*TaskidNotExists"):
+        asr.result()
+
+    assert get.call_count == bcut_module.RESULT_TASK_NOT_FOUND_ATTEMPTS
+    assert sleeps == [1, 2, 4]
+
+
+def test_result_does_not_retry_non_transient_api_error(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    response = Mock()
+    response.json.return_value = {
+        "code": 400,
+        "message": "Invalid request",
+        "ttl": 1,
+    }
+    get = Mock(return_value=response)
+    sleep = Mock()
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="code=400.*Invalid request"):
+        asr.result()
+
+    get.assert_called_once()
+    sleep.assert_not_called()
+
+
+def test_result_rejects_nonzero_code_even_when_data_is_present(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr.task_id = "task-id"
+    response = Mock()
+    response.json.return_value = {
+        "code": 400,
+        "message": "Invalid request",
+        "data": {"state": 4},
+    }
+    get = Mock(return_value=response)
+    sleep = Mock()
+    monkeypatch.setattr(bcut_module.requests, "get", get)
+    monkeypatch.setattr(bcut_module.time, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="code=400.*Invalid request"):
+        asr.result()
+
+    get.assert_called_once()
+    sleep.assert_not_called()
+
+
+def test_response_data_reports_invalid_json():
+    response = Mock()
+    response.json.side_effect = ValueError("bad json")
+
+    with pytest.raises(RuntimeError, match="不是有效 JSON"):
+        bcut_module._response_data(response, "测试")
+
+
+def test_response_data_reports_missing_required_field():
+    response = Mock()
+    response.json.return_value = {"code": 0, "data": {}}
+
+    with pytest.raises(RuntimeError, match="响应缺少字段: state"):
+        bcut_module._response_data(
+            response, "查询转录结果", required_fields=("state",)
+        )
+
+
+def test_create_task_uses_resource_model_id(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr._BcutASR__download_url = "https://example.test/audio.mp3"
+    response = Mock()
+    response.json.return_value = {"code": 0, "data": {"task_id": "task-id"}}
+    post = Mock(return_value=response)
+    monkeypatch.setattr(bcut_module.requests, "post", post)
+
+    assert asr.create_task() == "task-id"
+    assert (
+        post.call_args.kwargs["json"]["model_id"]
+        == bcut_module.BCUT_RESOURCE_MODEL_ID
+    )
+
+
+def test_run_stops_immediately_when_task_fails(monkeypatch):
+    asr = BcutASR.__new__(BcutASR)
+    asr._check_rate_limit = Mock()
+    asr.upload = Mock()
+    asr.create_task = Mock(return_value="task-id")
+    asr.result = Mock(return_value={"state": 3, "remark": "service rejected task"})
+    sleep = Mock()
+    monkeypatch.setattr(bcut_module.time, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="service rejected task"):
+        asr._run()
+
+    asr.result.assert_called_once()
+    sleep.assert_not_called()
 
 
 def test_result_stops_after_bounded_network_retries(monkeypatch):

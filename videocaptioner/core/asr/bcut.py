@@ -17,10 +17,58 @@ API_REQ_UPLOAD = API_BASE_URL + "/resource/create"
 API_COMMIT_UPLOAD = API_BASE_URL + "/resource/create/complete"
 API_CREATE_TASK = API_BASE_URL + "/task"
 API_QUERY_RESULT = API_BASE_URL + "/task/result"
+BCUT_RESOURCE_MODEL_ID = "8"
+# The live API rejects task creation with 7, but result queries use 7.
+BCUT_QUERY_MODEL_ID = 7
 RESULT_REQUEST_ATTEMPTS = 3
+RESULT_TASK_NOT_FOUND_ATTEMPTS = 4
 RESULT_REQUEST_TIMEOUT = (5, 20)
 
 logger = setup_logger("bcut")
+
+
+class _BcutResponseError(RuntimeError):
+    def __init__(self, operation: str, message: str, *, code: Any = None):
+        self.code = code
+        code_text = f" (code={code})" if code is not None else ""
+        super().__init__(f"B 接口{operation}失败{code_text}: {message}")
+
+
+def _response_data(
+    response: requests.Response,
+    operation: str,
+    *,
+    required_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise _BcutResponseError(operation, "返回的不是有效 JSON") from exc
+
+    if not isinstance(payload, dict):
+        raise _BcutResponseError(operation, "返回的数据格式无效")
+
+    code = payload.get("code")
+    if code not in (None, 0, "0"):
+        message = payload.get("message") or payload.get("msg") or "未知业务错误"
+        raise _BcutResponseError(operation, str(message), code=code)
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        message = payload.get("message") or payload.get("msg")
+        if not message or str(message) == "0":
+            message = "响应缺少 data"
+        raise _BcutResponseError(operation, str(message), code=payload.get("code"))
+
+    missing = [field for field in required_fields if field not in data]
+    if missing:
+        raise _BcutResponseError(
+            operation,
+            f"响应缺少字段: {', '.join(missing)}",
+            code=payload.get("code"),
+        )
+    return data
 
 
 class BcutASR(BaseASR):
@@ -67,14 +115,22 @@ class BcutASR(BaseASR):
                 "name": "audio.mp3",
                 "size": len(self.file_binary),
                 "ResourceFileType": "mp3",
-                "model_id": "8",
+                "model_id": BCUT_RESOURCE_MODEL_ID,
             }
         )
 
         resp = requests.post(API_REQ_UPLOAD, data=payload, headers=self.headers)
-        resp.raise_for_status()
-        resp = resp.json()
-        resp_data = resp["data"]
+        resp_data = _response_data(
+            resp,
+            "请求上传",
+            required_fields=(
+                "in_boss_key",
+                "resource_id",
+                "upload_id",
+                "upload_urls",
+                "per_size",
+            ),
+        )
 
         self.__in_boss_key = resp_data["in_boss_key"]
         self.__resource_id = resp_data["resource_id"]
@@ -117,57 +173,82 @@ class BcutASR(BaseASR):
                 "ResourceId": self.__resource_id,
                 "Etags": ",".join(self.__etags) if self.__etags else "",
                 "UploadId": self.__upload_id,
-                "model_id": "8",
+                "model_id": BCUT_RESOURCE_MODEL_ID,
             }
         )
         resp = requests.post(API_COMMIT_UPLOAD, data=data, headers=self.headers)
-        resp.raise_for_status()
-        resp = resp.json()
-        self.__download_url = resp["data"]["download_url"]
+        resp_data = _response_data(
+            resp, "确认上传", required_fields=("download_url",)
+        )
+        self.__download_url = resp_data["download_url"]
 
     def create_task(self) -> str:
         """Create ASR task."""
         resp = requests.post(
             API_CREATE_TASK,
-            json={"resource": self.__download_url, "model_id": "8"},
+            json={
+                "resource": self.__download_url,
+                "model_id": BCUT_RESOURCE_MODEL_ID,
+            },
             headers=self.headers,
         )
-        resp.raise_for_status()
-        resp = resp.json()
-        self.task_id = resp["data"]["task_id"]
+        resp_data = _response_data(
+            resp, "创建转录任务", required_fields=("task_id",)
+        )
+        self.task_id = resp_data["task_id"]
         return self.task_id or ""
 
     def result(self, task_id: Optional[str] = None):
         """Query ASR result."""
-        for attempt in range(RESULT_REQUEST_ATTEMPTS):
+        network_failures = 0
+        task_not_found_failures = 0
+        while True:
             try:
                 resp = requests.get(
                     API_QUERY_RESULT,
-                    params={"model_id": 7, "task_id": task_id or self.task_id},
+                    params={
+                        "model_id": BCUT_QUERY_MODEL_ID,
+                        "task_id": task_id or self.task_id,
+                    },
                     headers=self.headers,
                     timeout=RESULT_REQUEST_TIMEOUT,
                 )
-                resp.raise_for_status()
-                return resp.json()["data"]
+                return _response_data(
+                    resp, "查询转录结果", required_fields=("state",)
+                )
             except requests.exceptions.HTTPError:
                 raise
             except (
                 requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
             ) as exc:
-                if attempt + 1 >= RESULT_REQUEST_ATTEMPTS:
+                network_failures += 1
+                if network_failures >= RESULT_REQUEST_ATTEMPTS:
                     raise
-                delay = 2**attempt
+                delay = 2 ** (network_failures - 1)
                 logger.warning(
                     "Bcut result request failed (%s/%s), retrying in %ss: %s",
-                    attempt + 1,
+                    network_failures,
                     RESULT_REQUEST_ATTEMPTS,
                     delay,
                     exc,
                 )
                 time.sleep(delay)
-
-        raise RuntimeError("Bcut result request failed")
+            except _BcutResponseError as exc:
+                if str(exc.code) != "9":
+                    raise
+                task_not_found_failures += 1
+                if task_not_found_failures >= RESULT_TASK_NOT_FOUND_ATTEMPTS:
+                    raise
+                delay = 2 ** (task_not_found_failures - 1)
+                logger.warning(
+                    "Bcut task is not visible yet (%s/%s), retrying in %ss: %s",
+                    task_not_found_failures,
+                    RESULT_TASK_NOT_FOUND_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
 
     def _run(
         self, callback: Optional[Callable[[int, str], None]] = None, **kwargs: Any
@@ -194,15 +275,27 @@ class BcutASR(BaseASR):
         task_resp = None
         for _ in range(500):
             task_resp = self.result()
-            if task_resp["state"] == 4:
+            state = task_resp["state"]
+            if state == 4:
                 break
+            if state == 3:
+                detail = task_resp.get("remark") or task_resp.get("message")
+                raise RuntimeError(f"B 接口转录任务失败: {detail or '未知原因'}")
+            if state not in (0, 1, 2):
+                raise RuntimeError(f"B 接口返回未知任务状态: {state!r}")
             time.sleep(1)
 
         if task_resp is None or task_resp["state"] != 4:
             raise RuntimeError("ASR task failed or timeout")
 
+        result_payload = task_resp.get("result")
+        if isinstance(result_payload, str):
+            result_payload = json.loads(result_payload)
+        if not isinstance(result_payload, dict):
+            raise RuntimeError("B 接口任务已完成，但响应缺少有效 result")
+
         callback(*ASRStatus.COMPLETED.callback_tuple())
-        return json.loads(task_resp["result"])
+        return result_payload
 
     def _make_segments(self, resp_data: dict) -> List[ASRDataSeg]:
         if self.need_word_time_stamp:

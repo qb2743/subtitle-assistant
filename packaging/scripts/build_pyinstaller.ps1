@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $Root
@@ -72,8 +72,14 @@ try {
         throw "Bundled project metadata does not match version $sourceVersion"
     }
 } finally {
+    # Remove-Item 在 PowerShell 5.1 下删除 junction 会抛 NullReferenceException,
+    # 导致构建成功后仍以失败退出并遗留临时 junction。改用 cmd rmdir 只删除
+    # 链接本身(不会递归进目标目录),并临时放宽 ErrorActionPreference 避免
+    # stderr 重定向在 Stop 模式下把 rmdir 的正常输出变成终止错误。
     if ($BuildJunction -and (Test-Path -LiteralPath $BuildJunction)) {
-        Remove-Item -LiteralPath $BuildJunction -Force
+        $ErrorActionPreference = "Continue"
+        & cmd.exe /c rmdir "$BuildJunction"
+        $ErrorActionPreference = "Stop"
     }
 }
 Write-Host "Output: $Root/dist/字幕助手/"

@@ -1,5 +1,6 @@
 """Tests for the DTW alignment core (ported from txt2srt)."""
 
+import videocaptioner.core.alignment.dtw_aligner as dtw_mod
 from videocaptioner.core.alignment import (
     align_texts,
     fix_overlapping_timestamps,
@@ -208,3 +209,157 @@ def test_align_texts_merges_tiny_fragments():
     aligned = align_texts(recognized, ["to"])
     assert len(aligned) == 1
     assert aligned[0]["text"] == "to"
+
+
+# --- phonetic-aware distance (#1) ---
+
+
+def test_homophones_cost_less_than_unrelated_chars():
+    # 师姐/世界 share syllables (shī-jiě / shì-jiè): same initial+final, tone
+    # differs — cheaper than an unrelated pair, so DTW paths survive ASR
+    # mishearings instead of derailing.
+    assert 0 < dtw_mod._char_cost("师", "世") < 1
+    assert 0 < dtw_mod._char_cost("姐", "界") < 1
+    # Exact homophones (部署/部属) cost even less than tone-shifted pairs.
+    assert dtw_mod._char_cost("署", "属") < dtw_mod._char_cost("师", "世")
+    # 好(hǎo) shares the 'h' initial with 坏(huài) -> 0.7; fully unrelated
+    # pairs (好/天: h-t initials, ao-ian finals) cost 1.
+    assert dtw_mod._char_cost("好", "坏") < 1.0
+    assert dtw_mod._char_cost("好", "天") == 1.0
+    # ASCII case carries no phonetic information.
+    assert dtw_mod._char_cost("h", "H") == 0.0
+    # Confusable English letter pairs cost less than unrelated ones.
+    assert 0 < dtw_mod._char_cost("v", "f") < 1
+    assert dtw_mod._char_cost("x", "f") == 1.0
+
+
+def test_match_rate_higher_for_homophone_errors():
+    # Same ASR text; user text with homophone errors (师姐 vs 世界) must score
+    # a higher match rate than one with unrelated chars — the phonetic matrix
+    # treats mishearings as near-matches.
+    recognized = [{"start": 0.0, "end": 2.0, "text": "你好师姐"}]
+    homophone = {}
+    match_user_text_to_timestamps(recognized, ["你好世界"], stats=homophone)
+    unrelated = {}
+    match_user_text_to_timestamps(recognized, ["你好坏事"], stats=unrelated)
+    assert homophone["match_rate"] > unrelated["match_rate"]
+    assert homophone["match_rate"] > 70
+
+
+# --- word-level timestamp awareness (#2) ---
+
+
+def test_word_level_segments_snap_to_word_boundaries():
+    # Word-level ASR: each segment is one word. Subtitle boundaries must land
+    # exactly on word starts/ends (last char of each word sits at the word's
+    # end), and the word-level flag must be reported.
+    recognized = [
+        {"start": 0.0, "end": 0.4, "text": "今天"},
+        {"start": 0.4, "end": 0.9, "text": "天气"},
+        {"start": 0.9, "end": 1.4, "text": "真好"},
+    ]
+    stats = {}
+    aligned = match_user_text_to_timestamps(recognized, ["今天天气真好"], stats=stats)
+    assert stats["word_level"] is True
+    assert len(aligned) == 1
+    assert aligned[0]["text"] == "今天天气真好"
+    assert aligned[0]["start"] == 0.0
+    assert aligned[0]["end"] == 1.4
+
+
+def test_sentence_level_segments_report_word_level_false():
+    stats = {}
+    match_user_text_to_timestamps(
+        [{"start": 0.0, "end": 2.0, "text": "今天天气真好"}],
+        ["今天天气真好"],
+        stats=stats,
+    )
+    assert stats["word_level"] is False
+
+
+# --- chunked two-pass DTW (#3) ---
+
+
+def test_global_path_used_below_threshold():
+    stats = {}
+    match_user_text_to_timestamps(
+        [{"start": 0.0, "end": 1.0, "text": "你好"}], ["你好"], stats=stats
+    )
+    assert stats["chunked"] is False
+
+
+def test_chunked_path_matches_global_for_identical_text(monkeypatch):
+    monkeypatch.setattr(dtw_mod, "_CHUNK_CELL_THRESHOLD", 300)
+    text = "一二三四五六七八九十" * 3  # 30 chars -> 900 cells > 300
+    stats = {}
+    aligned = match_user_text_to_timestamps(
+        [{"start": 0.0, "end": 3.0, "text": text}], [text], stats=stats
+    )
+    assert stats["chunked"] is True
+    assert len(aligned) == 1
+    assert aligned[0]["text"] == text
+    assert aligned[0]["start"] == 0.0
+    assert aligned[0]["end"] == 3.0
+
+
+def test_chunked_path_matches_global_across_sentences(monkeypatch):
+    # Multi-sentence text split into several coarse units: the two-pass path
+    # must produce the same subtitles as the global DTW.
+    sentences = [f"第{i}句的测试内容" for i in range(40)]
+    recognized = [
+        {"start": i * 1.0, "end": i * 1.0 + 1.0, "text": s}
+        for i, s in enumerate(sentences)
+    ]
+
+    monkeypatch.setattr(dtw_mod, "_CHUNK_CELL_THRESHOLD", 10**9)
+    global_aligned = match_user_text_to_timestamps(recognized, sentences)
+    monkeypatch.setattr(dtw_mod, "_CHUNK_CELL_THRESHOLD", 1000)
+    chunked_aligned = match_user_text_to_timestamps(recognized, sentences)
+
+    assert len(global_aligned) == len(chunked_aligned) == 40
+    for a, b in zip(global_aligned, chunked_aligned):
+        assert a["text"] == b["text"]
+        assert abs(a["start"] - b["start"]) < 1e-6
+        assert abs(a["end"] - b["end"]) < 1e-6
+
+
+def test_chunked_path_keeps_user_text_with_missing_sentence(monkeypatch):
+    # User manuscript contains a sentence the ASR never heard; chunked DTW must
+    # still emit it (estimated duration), not drop it.
+    monkeypatch.setattr(dtw_mod, "_CHUNK_CELL_THRESHOLD", 300)
+    rec_text = "一二三四五六七八九十" * 3
+    user_text = "一二三四五六七八九十" * 2 + "完全不同的句子内容"
+    aligned = match_user_text_to_timestamps(
+        [{"start": 0.0, "end": 3.0, "text": rec_text}], [user_text]
+    )
+    assert len(aligned) >= 1
+    assert "".join(a["text"] for a in aligned) == user_text
+
+
+def test_chunked_path_long_single_sentence_spans_full_timeline(monkeypatch):
+    # A 320-char punctuation-less sentence must still map onto the whole
+    # segment timeline when chunked (regression: rec units used to stay
+    # unsplit, collapsing every anchor onto one giant unit's midpoint).
+    monkeypatch.setattr(dtw_mod, "_CHUNK_CELL_THRESHOLD", 10_000)
+    text = "今天天气很好我们一起去公园散步" * 20
+    stats = {}
+    aligned = match_user_text_to_timestamps(
+        [{"start": 0.0, "end": 40.0, "text": text}], [text], stats=stats
+    )
+    assert stats["chunked"] is True
+    assert len(aligned) == 1
+    assert aligned[0]["start"] == 0.0
+    assert aligned[0]["end"] == 40.0
+
+
+# --- stats (#4) ---
+
+
+def test_stats_expose_match_rate_and_counts():
+    stats = {}
+    match_user_text_to_timestamps(
+        [{"start": 0.0, "end": 1.0, "text": "你好世界"}], ["你好世界"], stats=stats
+    )
+    assert 99.0 < stats["match_rate"] <= 100.0
+    assert stats["user_chars"] == 4
+    assert stats["recognized_chars"] == 4

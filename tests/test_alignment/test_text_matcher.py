@@ -105,3 +105,15 @@ def test_align_text_to_asr_keeps_decimal_numbers():
     assert "2.5" in joined
     assert not any(seg.text.strip().startswith("5 kilometers") for seg in aligned.segments)
     assert not any(seg.text.strip().rstrip(".") == "About 2" for seg in aligned.segments)
+
+
+def test_align_text_to_asr_reports_stats():
+    # The adapter forwards a stats dict so callers can surface match confidence.
+    asr = ASRData([ASRDataSeg(text="你好师姐", start_time=0, end_time=2000)])
+    stats = {}
+    align_text_to_asr(asr, "你好世界", max_chars=30, stats=stats)
+    assert "match_rate" in stats
+    assert "word_level" in stats
+    assert "chunked" in stats
+    # Homophone errors (师姐/世界) keep the rate well above zero.
+    assert stats["match_rate"] > 50

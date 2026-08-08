@@ -47,8 +47,11 @@ def run(args: Namespace, config: dict) -> int:
         f"Aligning transcript ({len(user_text)} chars) onto {len(asr_data.segments)} "
         f"ASR segments via DTW..."
     )
+    stats: dict = {}
     try:
-        aligned = align_text_to_asr(asr_data, user_text, max_chars=args.max_chars)
+        aligned = align_text_to_asr(
+            asr_data, user_text, max_chars=args.max_chars, stats=stats
+        )
     except Exception as exc:
         output.error(f"Alignment failed: {output.clean_error(str(exc))}")
         return EXIT.RUNTIME_ERROR
@@ -56,6 +59,15 @@ def run(args: Namespace, config: dict) -> int:
     if not aligned.segments:
         output.error("Alignment produced no segments.")
         return EXIT.RUNTIME_ERROR
+
+    # Low-confidence warning: the transcript and the ASR text differ a lot, so
+    # the generated timeline is likely inaccurate.
+    match_rate = stats.get("match_rate")
+    if match_rate is not None and match_rate < 85.0:
+        output.warn(
+            f"Alignment confidence low ({match_rate:.0f}%) — "
+            "timestamps may be inaccurate; check the transcript matches the audio"
+        )
 
     output_path = (
         Path(args.output)

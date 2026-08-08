@@ -148,3 +148,54 @@ def test_progress_callback_reports_stages(tmp_path, monkeypatch):
     msgs = [m for _p, m in progress]
     assert any("transcribing" in m for m in msgs)
     assert any("aligning" in m for m in msgs)
+
+
+def test_task_reports_match_stats(tmp_path, monkeypatch):
+    _patch_transcribe(monkeypatch)
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"x")
+    task = TextMatchingTask(
+        TextMatchingConfig(
+            media_path=str(audio),
+            user_text="你好世界\n今天天气真好",
+            output_path=str(tmp_path / "o.srt"),
+        )
+    )
+    task.execute()
+    assert task.last_stats is not None
+    assert task.last_stats["match_rate"] > 90
+
+
+def test_task_warns_on_low_confidence(tmp_path, monkeypatch):
+    # Manuscript and ASR content share no characters -> match_rate ~0; the
+    # task must surface a low-confidence progress message.
+    asr = ASRData([ASRDataSeg(text="完全不同的识别结果内容", start_time=0, end_time=2000)])
+    _patch_transcribe(monkeypatch, asr_data=asr)
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"x")
+    progress: list = []
+    TextMatchingTask(
+        TextMatchingConfig(
+            media_path=str(audio),
+            user_text="你好世界今天天气不错",
+            output_path=str(tmp_path / "o.srt"),
+            low_confidence_threshold=85.0,
+        )
+    ).execute(callback=lambda p, m: progress.append((p, m)))
+    assert any("置信度较低" in m for _p, m in progress)
+
+
+def test_task_no_warning_when_confidence_ok(tmp_path, monkeypatch):
+    _patch_transcribe(monkeypatch)
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"x")
+    progress: list = []
+    TextMatchingTask(
+        TextMatchingConfig(
+            media_path=str(audio),
+            user_text="你好世界\n今天天气真好",
+            output_path=str(tmp_path / "o.srt"),
+            low_confidence_threshold=85.0,
+        )
+    ).execute(callback=lambda p, m: progress.append((p, m)))
+    assert not any("置信度较低" in m for _p, m in progress)

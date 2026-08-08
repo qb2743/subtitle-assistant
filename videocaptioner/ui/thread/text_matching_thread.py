@@ -1,6 +1,7 @@
 """文稿匹配任务线程"""
 
 from pathlib import Path
+from typing import Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -50,6 +51,7 @@ class TextMatchingThread(QThread):
 
     progress = pyqtSignal(int, str)
     error = pyqtSignal(str)
+    warning = pyqtSignal(str)
     finished = pyqtSignal(str)
 
     def __init__(
@@ -68,6 +70,7 @@ class TextMatchingThread(QThread):
         self.language = language
         self.smart_split = smart_split
         self.asr_engine = asr_engine
+        self.match_rate: Optional[float] = None
         self._cancelled = False
 
     def run(self):
@@ -97,6 +100,18 @@ class TextMatchingThread(QThread):
             result_path = task.execute(callback=on_progress)
             if self._cancelled:
                 return
+
+            # 低置信度预警：文稿与识别内容差异过大时，时间轴很可能不准。
+            stats = task.last_stats or {}
+            match_rate = stats.get("match_rate")
+            if match_rate is not None:
+                self.match_rate = float(match_rate)
+                threshold = task.config.low_confidence_threshold
+                if threshold is not None and match_rate < threshold:
+                    self.warning.emit(
+                        f"对齐置信度较低（{match_rate:.0f}%），生成的 SRT 时间轴可能不准确，"
+                        f"建议检查文稿内容与视频/音频是否一致。"
+                    )
 
             logger.info(f"文稿匹配完成: {result_path}")
             self.finished.emit(str(result_path))

@@ -14,16 +14,33 @@ Pipeline (see :func:`align_texts`):
    in-order segments with sane min/max durations.
 3. :func:`optimize_subtitle_duration` — fill small inter-segment gaps.
 
+The char-level DTW distance is *phonetic-aware* (see :func:`_char_cost`):
+exact chars cost 0, CJK homophones and acoustically confusable English
+letter pairs cost < 1, so an ASR mishearing (师姐 vs 世界) no longer derails
+the warping path. Long transcripts (> ``_CHUNK_CELL_THRESHOLD`` cells) are
+aligned with a two-pass chunked DTW (:func:`_chunked_dtw_path`) so the n*m
+distance matrix never blows up in memory.
+
 Data format used internally (seconds, floats)::
 
     {"start": float, "end": float, "text": str}
 """
 
 import re
-from typing import Dict, List
+from functools import lru_cache
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from dtw import dtw
+
+try:
+    from pypinyin import Style, pinyin
+
+    _HAS_PYPINYIN = True
+except ImportError:  # pragma: no cover - falls back to exact-char matching
+    Style = None
+    pinyin = None
+    _HAS_PYPINYIN = False
 
 from videocaptioner.core.utils.logger import setup_logger
 
@@ -37,6 +54,31 @@ _PUNCTUATION = set("。，！？；：、,.!?;: 　「」『』“”‘’（�
 _SUBTITLE_STRIP_PUNCT = set(
     "。，！？；：、,.!?;:　「」『』“”‘’（）()【】[]\"\"…—–·《》〈〉-"
 )
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_LATIN_RE = re.compile(r"[a-zA-Z]")
+
+# Acoustically confusable ASCII letter pairs (lowercased): ASR often mishears
+# one for the other, so a sub-1 cost keeps the DTW path on track.
+_CONFUSABLE_LETTERS = frozenset(
+    frozenset(p)
+    for p in (
+        "vf", "bp", "dt", "sz", "mn", "ie", "ae", "ou",
+        "ck", "gj", "lr", "wv", "xs", "qw", "ph", "cz",
+    )
+)
+
+# Above this many distance-matrix cells, alignment switches from a single
+# global char DTW to the two-pass chunked DTW (:func:`_chunked_dtw_path`).
+# A global n*m float64 matrix costs 8 bytes × 2 (distance + cost): 2M cells
+# ≈ 32MB, beyond which quadratic memory/time is no longer acceptable.
+_CHUNK_CELL_THRESHOLD = 2_000_000
+# Coarse pass groups user/ASR text into units of ~this many stripped chars.
+_COARSE_UNIT_CHARS = 60
+# Defensive cap on the distinct-char block when building a distance matrix
+# (see :func:`_build_distance_matrix`); beyond it, fall back to plain
+# vectorized exact matching.
+_DISTINCT_BLOCK_MAX = 4_000_000
 
 
 # Contractions/possessives where ' is an apostrophe, not a quote: Juho's, don't,
@@ -129,6 +171,85 @@ def remove_punctuation(text: str) -> str:
             continue
         out.append(c)
     return "".join(out)
+
+
+@lru_cache(maxsize=16384)
+def _pinyin_feature(ch: str) -> Optional[Tuple[str, str, str, str]]:
+    """``(tone3, plain, initial, final)`` for a CJK char, else ``None``."""
+    if not _CJK_RE.fullmatch(ch) or not _HAS_PYPINYIN:
+        return None
+    try:
+        tone3 = pinyin(ch, style=Style.TONE3)[0][0]
+        plain = pinyin(ch, style=Style.NORMAL)[0][0]
+        initial = pinyin(ch, style=Style.INITIALS)[0][0]
+        final = pinyin(ch, style=Style.FINALS)[0][0]
+    except Exception:
+        return None
+    if tone3 == ch:  # pypinyin passed the char through (not CJK readable)
+        return None
+    return (tone3, plain, initial, final)
+
+
+@lru_cache(maxsize=65536)
+def _char_cost(a: str, b: str) -> float:
+    """Per-char-pair DTW cost: 0 = same, <1 = phonetically confusable, 1 = unrelated.
+
+    CJK pairs are scored via pinyin: exact homophones (部署/部属) cost 0.25,
+    same syllable with a different tone (师姐/世界) 0.4, shared initial or
+    final 0.7. Confusable English letter pairs cost 0.6. ASCII case is
+    ignored (it carries no phonetic information). Everything else costs 1.
+    """
+    if a == b:
+        return 0.0
+    if a.lower() == b.lower():
+        return 0.0
+    if _CJK_RE.fullmatch(a) and _CJK_RE.fullmatch(b):
+        pa, pb = _pinyin_feature(a), _pinyin_feature(b)
+        if pa and pb:
+            if pa[0] == pb[0]:
+                return 0.25
+            if pa[1] == pb[1]:
+                return 0.4
+            if (pa[2] and pa[2] == pb[2]) or (pa[3] and pa[3] == pb[3]):
+                return 0.7
+    elif _LATIN_RE.fullmatch(a) and _LATIN_RE.fullmatch(b):
+        if frozenset((a.lower(), b.lower())) in _CONFUSABLE_LETTERS:
+            return 0.6
+    return 1.0
+
+
+def _build_distance_matrix(user_chars: List[str], rec_chars: List[str]) -> np.ndarray:
+    """n_user x n_rec float64 cost matrix for dtw-python (requires "double").
+
+    Built from a distinct-char block + indexing so the Python per-pair cost
+    loop only runs over unique chars — the full n*m matrix is materialized
+    once (vectorized), not cell by cell.
+    """
+    u_unique = list(dict.fromkeys(user_chars))
+    r_unique = list(dict.fromkeys(rec_chars))
+    if len(u_unique) * len(r_unique) > _DISTINCT_BLOCK_MAX:  # defensive
+        u_arr = np.array(user_chars, dtype="U1")[:, None]
+        r_arr = np.array(rec_chars, dtype="U1")[None, :]
+        return (u_arr != r_arr).astype(np.float64)
+    block = np.empty((len(u_unique), len(r_unique)), dtype=np.float64)
+    for i, uc in enumerate(u_unique):
+        for j, rc in enumerate(r_unique):
+            block[i, j] = _char_cost(uc, rc)
+    u_pos = {c: i for i, c in enumerate(u_unique)}
+    r_pos = {c: i for i, c in enumerate(r_unique)}
+    u_index = np.array([u_pos[c] for c in user_chars], dtype=np.intp)
+    r_index = np.array([r_pos[c] for c in rec_chars], dtype=np.intp)
+    return block[np.ix_(u_index, r_index)]
+
+
+def _is_word_level_text(text: str) -> bool:
+    """True when a recognized segment is a single word (word-level ASR output):
+    one whitespace-delimited token, or at most two CJK characters."""
+    if not text:
+        return False
+    if _CJK_RE.search(text):
+        return len(text) <= 2 and not _LATIN_RE.search(text)
+    return len(text.split()) == 1
 
 
 def split_text_into_segments(text: str, max_chars: int = 30) -> List[str]:
@@ -230,12 +351,17 @@ def match_user_text_to_timestamps(
     recognized_segments: List[Dict],
     user_sentences: List[str],
     allow_pause_split: bool = True,
+    stats: Optional[Dict] = None,
 ) -> List[Dict]:
     """DTW-align user sentences onto recognized segment timestamps.
 
     Args:
         recognized_segments: ASR output, ``[{"start", "end", "text"}]`` (seconds).
         user_sentences: the user's correct transcript, split into sentences.
+        allow_pause_split: split long sentences at relative pauses.
+        stats: optional dict filled with ``match_rate`` (phonetic similarity of
+            the warping path, 0-100), ``word_level`` (ASR segments are single
+            words), ``chunked`` (two-pass chunked DTW was used), and char counts.
 
     Returns:
         Aligned segments ``[{"start", "end", "text"}]`` (seconds) using the
@@ -261,16 +387,14 @@ def match_user_text_to_timestamps(
 
     logger.debug("Aligning %d user chars to %d recognized chars", n_user, n_recognized)
 
-    # Char-level distance matrix (0 = same char, 1 = different), vectorized.
-    # dtw-python's Cython backend requires float64 ("double").
-    user_arr = np.array(user_chars, dtype="U1")[:, None]
-    rec_arr = np.array(recognized_chars, dtype="U1")[None, :]
-    distance_matrix = (user_arr != rec_arr).astype(np.float64)
-
-    alignment = dtw(distance_matrix)
-    path = list(zip(alignment.index1, alignment.index2))
-    match_rate = (1 - alignment.normalizedDistance) * 100
-    logger.debug("DTW similarity: %.1f%%", match_rate)
+    # Char-level DTW path with a phonetic-aware distance (see _char_cost).
+    # Long inputs switch to a two-pass chunked alignment so the n*m distance
+    # matrix never blows up in memory/time (see _CHUNK_CELL_THRESHOLD).
+    path, mean_cost, chunked = _compute_dtw_path(
+        user_chars, recognized_chars, user_sentences, recognized_segments
+    )
+    match_rate = (1.0 - mean_cost) * 100
+    logger.debug("DTW similarity: %.1f%% (chunked=%s)", match_rate, chunked)
 
     # Map each recognized char index -> its owning segment + position.
     recognized_char_to_segment: List[Dict] = []
@@ -299,7 +423,15 @@ def match_user_text_to_timestamps(
         segment_duration = segment["end"] - segment["start"]
         total = seg_info["total_chars"]
         if total > 0:
-            user_char_times[i] = segment["start"] + (seg_info["char_idx"] / total) * segment_duration
+            if seg_info["char_idx"] >= total - 1:
+                # Last char of the segment sits at its end: with word-level ASR
+                # timestamps this lands the char exactly on the word boundary,
+                # so inter-word gaps below measure real pauses, not halves.
+                user_char_times[i] = segment["end"]
+            else:
+                user_char_times[i] = (
+                    segment["start"] + (seg_info["char_idx"] / total) * segment_duration
+                )
         else:
             user_char_times[i] = segment["start"]
 
@@ -414,7 +546,206 @@ def match_user_text_to_timestamps(
             "%d sentence(s) could not be matched; estimated durations used",
             len(user_sentences) - len(aligned_segments),
         )
+
+    if stats is not None:
+        stats["match_rate"] = match_rate
+        stats["word_level"] = all(
+            _is_word_level_text(remove_punctuation(seg["text"])) for seg in recognized_segments
+        )
+        stats["chunked"] = chunked
+        stats["user_chars"] = n_user
+        stats["recognized_chars"] = n_recognized
     return aligned_segments
+
+
+def _coarse_unit_ranges(
+    lengths: List[int], target: int, split_long: bool
+) -> List[Tuple[int, int]]:
+    """Group consecutive item lengths into coarse units of ~``target`` chars.
+
+    Returns ``(start, end)`` ranges into the globally stripped char sequence
+    (stripping commutes with concatenation, so per-item stripped lengths line
+    up with the global stripped sequence). ``split_long`` hard-splits a single
+    over-long item so a pathological punctuation-less paragraph cannot create
+    a giant unit.
+    """
+    units: List[Tuple[int, int]] = []
+    pos = 0
+    start = 0
+    acc = 0
+    for n in lengths:
+        if n <= 0:
+            continue
+        if split_long and n > target:
+            if acc:
+                units.append((start, pos))
+                acc = 0
+            cur = pos
+            remaining = n
+            while remaining > target:
+                units.append((cur, cur + target))
+                cur += target
+                remaining -= target
+            units.append((cur, cur + remaining))
+            pos += n
+            start = pos
+            continue
+        if acc and acc + n > target:
+            units.append((start, pos))
+            start = pos
+            acc = 0
+        acc += n
+        pos += n
+    if acc:
+        units.append((start, pos))
+    return units
+
+
+def _chunked_dtw_path(
+    user_chars: List[str],
+    rec_chars: List[str],
+    user_sentences: List[str],
+    recognized_segments: List[Dict],
+) -> Optional[Tuple[List[Tuple[int, int]], float]]:
+    """Two-pass DTW for long text (see ``_CHUNK_CELL_THRESHOLD``).
+
+    Pass 1 (coarse): group both texts into units of ~``_COARSE_UNIT_CHARS``
+    chars and DTW the unit grid, scoring each pair with the cosine of their
+    char-count vectors (``U @ R.T`` — vectorized, no per-pair Python loop).
+    Pass 2 (fine): for each user unit, run the exact char DTW against the
+    recognized window the coarse path assigned, plus a one-unit margin.
+
+    Returns ``(path, mean_path_cost)``, or ``None`` when the stripped
+    sequences are inconsistent with per-sentence stripping (caller falls back
+    to the global DTW).
+    """
+    user_lengths = [len(remove_punctuation(s)) for s in user_sentences]
+    rec_lengths = [len(remove_punctuation(seg["text"])) for seg in recognized_segments]
+    if "".join(remove_punctuation(s) for s in user_sentences) != "".join(user_chars) or (
+        "".join(remove_punctuation(seg["text"]) for seg in recognized_segments) != "".join(rec_chars)
+    ):
+        return None
+    user_units = _coarse_unit_ranges(user_lengths, _COARSE_UNIT_CHARS, split_long=True)
+    # Rec units are split_long too: a single huge ASR segment would otherwise
+    # become one giant unit and every user unit's anchor would collapse onto
+    # its midpoint, dragging the fine paths to the wrong place.
+    rec_units = _coarse_unit_ranges(rec_lengths, _COARSE_UNIT_CHARS, split_long=True)
+    if not user_units or not rec_units:
+        return None
+
+    distinct = sorted(
+        {c for us, ue in user_units for c in user_chars[us:ue]}
+        | {c for rs, re in rec_units for c in rec_chars[rs:re]}
+    )
+    col = {c: i for i, c in enumerate(distinct)}
+    U = np.zeros((len(user_units), len(distinct)), dtype=np.float32)
+    for k, (us, ue) in enumerate(user_units):
+        for c in user_chars[us:ue]:
+            U[k, col[c]] += 1
+    R = np.zeros((len(rec_units), len(distinct)), dtype=np.float32)
+    for k, (rs, re) in enumerate(rec_units):
+        for c in rec_chars[rs:re]:
+            R[k, col[c]] += 1
+
+    norm_u = np.sqrt(np.einsum("ij,ij->i", U, U))
+    norm_r = np.sqrt(np.einsum("ij,ij->i", R, R))
+    cos = (U @ R.T) / np.maximum(norm_u[:, None] * norm_r[None, :], 1e-9)
+    alignment = dtw((1.0 - cos).astype(np.float64))
+    coarse_path = list(zip(alignment.index1, alignment.index2))
+
+    unit_to_rec: Dict[int, List[int]] = {}
+    for i, j in coarse_path:
+        unit_to_rec.setdefault(i, []).append(j)
+
+    full_path: List[Tuple[int, int]] = []
+    path_len = 0
+    cost_sum = 0.0
+    for k, (us, ue) in enumerate(user_units):
+        on_path = unit_to_rec.get(k)
+        if not on_path:
+            continue
+        lo = max(0, min(on_path) - 1)
+        hi = min(len(rec_units), max(on_path) + 2)  # exclusive; +2 = one-unit margin
+        r_start = rec_units[lo][0]
+        r_end = rec_units[hi - 1][1]
+        win_user = user_chars[us:ue]
+        win_rec = rec_chars[r_start:r_end]
+        if not win_user or not win_rec:
+            continue
+        matrix = _build_distance_matrix(win_user, win_rec)
+        raw_matrix = matrix
+        # Bias the window toward the diagonal through the coarse anchor, and
+        # pad zero rows above/below so the path may start/end at that diagonal
+        # instead of being forced through the window corners. With identical
+        # chars everywhere an unconstrained DTW is free to wander into the
+        # margin, and a corner-forced path cannot cheaply escape mismatched
+        # margin columns — the tiny bias (far below any real cost 0.25+) breaks
+        # the zero-cost ties toward the true correspondence, and the zero rows
+        # emulate open-begin/open-end (dtw-python's own flags need 'N'-norm
+        # step patterns). Padding rows are dropped from the result.
+        anchor_i = (len(win_user) - 1) // 2
+        mid_unit = (min(on_path) + max(on_path)) // 2
+        anchor_j = (rec_units[mid_unit][0] + rec_units[mid_unit][1] - 1) // 2 - r_start
+        d = anchor_j - anchor_i
+        ii = np.arange(len(win_user))[:, None]
+        jj = np.arange(len(win_rec))[None, :]
+        matrix = matrix + 1e-3 * np.abs(ii - jj + d)
+        a = dtw(
+            np.vstack(
+                [
+                    np.zeros((1, len(win_rec))),
+                    matrix,
+                    np.zeros((1, len(win_rec))),
+                ]
+            )
+        )
+        idx1 = np.asarray(a.index1)
+        idx2 = np.asarray(a.index2)
+        # Drop the padding rows and remap to window coordinates.
+        valid = (idx1 >= 1) & (idx1 <= len(win_user))
+        idx1 = idx1[valid] - 1
+        idx2 = idx2[valid]
+        for i, j in zip(idx1, idx2):
+            full_path.append((us + int(i), r_start + int(j)))
+        path_len += len(idx1)
+        # Mean cost uses the *unbiased* matrix so match_rate stays consistent
+        # with the global path (the bias only breaks ties, it is not content).
+        cost_sum += float(np.sum(raw_matrix[idx1, idx2]))
+    if not path_len:
+        return None
+    return full_path, cost_sum / path_len
+
+
+def _compute_dtw_path(
+    user_chars: List[str],
+    rec_chars: List[str],
+    user_sentences: List[str],
+    recognized_segments: List[Dict],
+) -> Tuple[List[Tuple[int, int]], float, bool]:
+    """Char-level DTW path + mean path cost, dispatching to the two-pass
+    chunked implementation for long inputs (see ``_CHUNK_CELL_THRESHOLD``).
+
+    Returns ``(path, mean_path_cost, chunked)``.
+    """
+    n_user, n_rec = len(user_chars), len(rec_chars)
+    if n_user * n_rec <= _CHUNK_CELL_THRESHOLD:
+        matrix = _build_distance_matrix(user_chars, rec_chars)
+        alignment = dtw(matrix)
+        idx1, idx2 = alignment.index1, alignment.index2
+        path = list(zip(idx1, idx2))
+        mean_cost = float(np.mean(matrix[idx1, idx2])) if path else 0.0
+        return path, mean_cost, False
+    chunked = _chunked_dtw_path(user_chars, rec_chars, user_sentences, recognized_segments)
+    if chunked is None:
+        # Degenerate stripped-sequence mismatch; accept the memory cost of the
+        # global DTW rather than misalign (vanishingly rare in practice).
+        matrix = _build_distance_matrix(user_chars, rec_chars)
+        alignment = dtw(matrix)
+        idx1, idx2 = alignment.index1, alignment.index2
+        path = list(zip(idx1, idx2))
+        mean_cost = float(np.mean(matrix[idx1, idx2])) if path else 0.0
+        return path, mean_cost, False
+    return chunked[0], chunked[1], True
 
 
 def _merge_tiny_segments(segments: List[Dict], min_chars: int = 2) -> List[Dict]:
@@ -518,9 +849,19 @@ def align_texts(
     recognized_segments: List[Dict],
     user_sentences: List[str],
     allow_pause_split: bool = True,
+    stats: Optional[Dict] = None,
 ) -> List[Dict]:
-    """Full alignment pipeline: DTW match → merge tiny → fix overlaps → optimize durations."""
-    aligned = match_user_text_to_timestamps(recognized_segments, user_sentences, allow_pause_split=allow_pause_split)
+    """Full alignment pipeline: DTW match → merge tiny → fix overlaps → optimize durations.
+
+    ``stats`` (optional) is filled by the DTW match — see
+    :func:`match_user_text_to_timestamps`.
+    """
+    aligned = match_user_text_to_timestamps(
+        recognized_segments,
+        user_sentences,
+        allow_pause_split=allow_pause_split,
+        stats=stats,
+    )
     aligned = _merge_tiny_segments(aligned)
     aligned = fix_overlapping_timestamps(aligned)
     aligned = optimize_subtitle_duration(aligned)

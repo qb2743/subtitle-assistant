@@ -92,6 +92,7 @@ def align_text_to_asr(
     max_chars: int = 30,
     language: str = "zh",
     smart_split: bool = True,
+    stats: Optional[dict] = None,
 ) -> ASRData:
     """Align ``user_text`` onto ``asr_data``'s timeline via DTW.
 
@@ -101,6 +102,8 @@ def align_text_to_asr(
         max_chars: max characters per subtitle segment; ``0`` or negative = no limit.
         language: language for word-level segmentation ("en" for English, others for char-level).
         smart_split: for English with max_chars>0, split by word boundaries.
+        stats: optional dict filled with ``match_rate`` / ``word_level`` /
+            ``chunked`` — see :func:`match_user_text_to_timestamps`.
 
     Returns:
         A new :class:`ASRData` whose segments carry the user's text on the
@@ -114,7 +117,12 @@ def align_text_to_asr(
 
     user_sentences = _user_text_to_sentences(user_text, max_chars, language, smart_split)
 
-    aligned = align_texts(recognized, user_sentences, allow_pause_split=(max_chars > 0))
+    aligned = align_texts(
+        recognized,
+        user_sentences,
+        allow_pause_split=(max_chars > 0),
+        stats=stats,
+    )
     new_segments = [
         ASRDataSeg(
             text=strip_subtitle_punctuation(segment["text"].strip(), language),
@@ -167,6 +175,10 @@ class TextMatchingConfig:
     # ASR/DTW/snap timestamps so a mis-aligned subtitle can be diagnosed. Off by
     # default; set True to investigate a specific misalignment.
     debug_dump: bool = False
+    # Warn (progress callback) when the DTW match rate falls below this
+    # percentage — the manuscript and the ASR content differ a lot, so the
+    # timeline is likely inaccurate. None disables the warning.
+    low_confidence_threshold: Optional[float] = 85.0
     # Full ASR config; if omitted, a FasterWhisper default is used. The caller
     # typically supplies this (with the chosen engine, model dir, api key, ...).
     transcribe_config: Optional[TranscribeConfig] = None
@@ -178,10 +190,14 @@ class TextMatchingTask:
     Reuses the existing :func:`transcribe` (any registered ASR engine) for the
     timestamp source and :func:`align_text_to_asr` for DTW alignment. Video
     input is auto-converted to audio via ffmpeg (``video2audio``).
+
+    After :meth:`execute`, :attr:`last_stats` holds the alignment stats dict
+    (``match_rate`` etc.) — read it for confidence feedback.
     """
 
     def __init__(self, config: TextMatchingConfig):
         self.config = config
+        self.last_stats: Optional[dict] = None
 
     def execute(self, callback: Optional[ProgressCallback] = None) -> Path:
         """Run the pipeline; returns the output SRT path.
@@ -215,13 +231,16 @@ class TextMatchingTask:
             # 3. DTW align the user's correct transcript onto the ASR timeline.
             cb(70, "aligning transcript via DTW")
             align_language = cfg.language or self._detect_align_language(cfg.user_text)
+            stats: dict = {}
             aligned = align_text_to_asr(
                 asr_data,
                 cfg.user_text,
                 max_chars=cfg.max_chars,
                 language=align_language,
                 smart_split=cfg.smart_split,
+                stats=stats,
             )
+            self.last_stats = stats
             dtw_segments = [
                 {"start_ms": s.start_time, "end_ms": s.end_time, "text": s.text}
                 for s in aligned.segments
@@ -244,8 +263,19 @@ class TextMatchingTask:
             )
             aligned.save(str(out))
             if cfg.debug_dump:
-                self._write_debug_dump(out, asr_data, dtw_segments, snap_chain)
-            cb(100, "completed")
+                self._write_debug_dump(out, asr_data, dtw_segments, snap_chain, stats)
+
+            # 5. Low-confidence warning: manuscript differs a lot from the ASR
+            # content, so the generated timeline is likely inaccurate.
+            threshold = cfg.low_confidence_threshold
+            if (
+                threshold is not None
+                and aligned.segments
+                and stats.get("match_rate", 100.0) < threshold
+            ):
+                cb(100, f"对齐置信度较低 ({stats['match_rate']:.0f}%)，时间轴可能不准确")
+            else:
+                cb(100, "completed")
             return out
         finally:
             if temp_audio and Path(temp_audio).exists():
@@ -257,6 +287,7 @@ class TextMatchingTask:
         asr_data: "ASRData",
         dtw_segments: list[dict],
         snap_chain: list[dict],
+        stats: Optional[dict] = None,
     ) -> None:
         """TEMP: dump per-segment timing at each pipeline stage next to the SRT.
 
@@ -276,6 +307,10 @@ class TextMatchingTask:
             "dtw_aligned": dtw_segments,
             "snap_chain": snap_chain,
         }
+        if stats:
+            dump["stats"] = {
+                k: stats.get(k) for k in ("match_rate", "word_level", "chunked")
+            }
         debug_path = srt_path.with_suffix(".debug.json")
         try:
             debug_path.write_text(

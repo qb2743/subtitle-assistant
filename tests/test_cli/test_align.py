@@ -80,3 +80,19 @@ def test_align_command_default_output_path(tmp_path):
     rc = run(_args(subtitle=str(srt_path), text=USER_TEXT), {})  # no --output
     assert rc == 0
     assert (tmp_path / "asr.aligned.srt").exists()
+
+
+def test_align_command_warns_on_low_confidence(tmp_path, capsys):
+    # Transcript shares no content with the ASR text -> low match rate; the
+    # command must print a warning but still succeed.
+    srt_path = tmp_path / "asr.srt"
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:04,000\n完全无关的识别内容\n", encoding="utf-8"
+    )
+    out_path = tmp_path / "aligned.srt"
+
+    rc = run(_args(subtitle=str(srt_path), text="这是完全不同的用户文稿", output=str(out_path)), {})
+
+    assert rc == 0
+    assert out_path.exists()
+    assert "confidence" in capsys.readouterr().err.lower()

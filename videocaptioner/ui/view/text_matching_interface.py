@@ -525,6 +525,7 @@ class TextMatchingInterface(QWidget):
         # 连接信号
         self.worker_thread.progress.connect(self._on_progress)
         self.worker_thread.error.connect(self._on_error)
+        self.worker_thread.warning.connect(self._on_warning)
         self.worker_thread.finished.connect(self._on_finished)
 
         # 启动线程
@@ -554,6 +555,18 @@ class TextMatchingInterface(QWidget):
             parent=self,
         )
 
+    def _on_warning(self, message: str):
+        """低置信度预警：文稿与 ASR 识别内容差异过大时提示时间轴可能不准。"""
+        if not self._running:
+            return
+        InfoBar.warning(
+            title="对齐置信度较低",
+            content=message,
+            duration=INFOBAR_DURATION_WARNING,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+
     def _on_finished(self, output_path: str):
         """匹配完成"""
         if not self._running:
@@ -561,7 +574,10 @@ class TextMatchingInterface(QWidget):
         self._running = False
         self._reset_start_button()
         self.progress_bar.setValue(100)
-        self.status_label.setText("匹配完成！")
+        rate = self.worker_thread.match_rate
+        self.status_label.setText(
+            f"匹配完成！匹配率 {rate:.0f}%" if rate is not None else "匹配完成！"
+        )
 
         folder = Path(output_path).parent
         open_btn = PushButton(FIF.FOLDER, "打开文件夹", self)

@@ -58,14 +58,25 @@ class TaskFactory:
         file_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        need_word_time_stamp: Optional[bool] = None,
     ) -> TranscribeTask:
-        """创建转录任务"""
+        """创建转录任务
+
+        Args:
+            file_path: 视频/音频文件路径
+            need_next_task: 是否为后续任务(字幕/对齐)转写
+            task_id: 任务 ID
+            need_word_time_stamp: 词级时间戳开关。None 时按默认语义取
+                cfg.need_split(供字幕智能断句使用);视频对齐面板等独立流程
+                可显式传入自己的开关,避免与字幕面板设置互相影响。
+        """
         # 获取文件名
         file_name = Path(file_path).stem
 
         # 构建输出路径
         if need_next_task:
-            need_word_time_stamp = cfg.need_split.value
+            if need_word_time_stamp is None:
+                need_word_time_stamp = cfg.need_split.value
             output_path = str(
                 Path(cfg.work_dir.value)
                 / file_name

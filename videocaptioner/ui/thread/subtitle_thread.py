@@ -187,17 +187,28 @@ class SubtitleThread(QThread):
 
             asr_data = ASRData.from_subtitle_file(subtitle_path)
 
-            # 1. 分割成字词级时间戳（对于非断句字幕且开启分割选项）
-            if subtitle_config.need_split and not asr_data.is_word_timestamp():
-                asr_data.split_to_word_segments()
-                self.update_all.emit(asr_data.to_json())
-
-            # 验证 LLM 配置
+            # 验证 LLM 配置（优化 / LLM 翻译 / 智能断句都需要）。必须在拆词之前
+            # 完成：need_split 会把字幕拆到字词级，之后必须靠 LLM 重新组句；
+            # 若 LLM 不可用，预览会停留在逐词状态且无法恢复。
             if self.need_llm(subtitle_config, asr_data):
                 self.progress.emit(
                     2, self.tr("开始验证 LLM 配置（限流或网络错误会自动重试）...")
                 )
                 subtitle_config = self._setup_llm_config()
+
+            # 1. 分割成字词级时间戳（对于非断句字幕且开启分割选项）。
+            #    仅在 LLM 可用时执行——拆分后依赖 LLM 智能断句重新组句；
+            #    LLM 未配置/不可用时跳过拆分，保留原断句继续后续处理，
+            #    避免字幕被拆成逐词后无法恢复。
+            if (
+                subtitle_config.need_split
+                and not asr_data.is_word_timestamp()
+                and subtitle_config.base_url
+                and subtitle_config.api_key
+                and subtitle_config.llm_model
+            ):
+                asr_data.split_to_word_segments()
+                self.update_all.emit(asr_data.to_json())
 
             # 2. 重新断句（对于字词级字幕）
             if asr_data.is_word_timestamp():

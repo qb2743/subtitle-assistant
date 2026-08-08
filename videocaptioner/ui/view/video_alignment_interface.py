@@ -653,7 +653,7 @@ class VideoAlignmentInterface(QWidget):
         split_row = QHBoxLayout()
         split_row.addWidget(BodyLabel("自动拆分字幕:", self))
         self.split_switch = SwitchButton(self)
-        self.split_switch.setChecked(bool(cfg.need_split.value))
+        self.split_switch.setChecked(bool(cfg.video_align_need_split.value))
         split_row.addWidget(self.split_switch)
         split_row.addSpacing(12)
         split_row.addWidget(BodyLabel("中日韩上限", self))
@@ -1136,7 +1136,7 @@ class VideoAlignmentInterface(QWidget):
         cfg.translator_service.value = self.translator_combo.currentData()
         cfg.need_translate.value = True
         cfg.need_optimize.value = self.optimize_switch.isChecked()
-        cfg.need_split.value = self.split_switch.isChecked()
+        cfg.video_align_need_split.value = self.split_switch.isChecked()
         cfg.max_word_count_cjk.value = self.max_cjk_spin.value()
         cfg.max_word_count_english.value = self.max_words_spin.value()
         provider = self._tts_provider_id()

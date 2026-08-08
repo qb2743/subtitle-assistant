@@ -278,7 +278,11 @@ class VideoTranslationThread(QThread):
         intermediate_dir.mkdir(parents=True, exist_ok=True)
 
         self.progress.emit(0, "开始视频转录...")
-        trans_task = TaskFactory.create_transcribe_task(self.video_path, need_next_task=True)
+        trans_task = TaskFactory.create_transcribe_task(
+            self.video_path,
+            need_next_task=True,
+            need_word_time_stamp=cfg.video_align_need_split.value,
+        )
         trans_task.output_path = str(intermediate_dir / Path(trans_task.output_path).name)
         trans_result = self._run_child(
             TranscriptThread(trans_task), 0, 25, "视频转录"

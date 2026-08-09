@@ -63,8 +63,8 @@ def _run_thread(task: SubtitleTask) -> dict:
 
 
 def _make_task(subtitle_path: str, output_path: str, **overrides) -> SubtitleTask:
+    # need_split 未覆盖时取 SubtitleConfig 的 dataclass 默认(True)。
     config = SubtitleConfig(
-        need_split=True,
         need_optimize=False,
         thread_num=2,
         batch_size=5,
@@ -98,6 +98,28 @@ def test_need_split_without_llm_keeps_original_sentences(tmp_path):
     content = out.read_text(encoding="utf-8")
     assert content.count("-->") == 2
     assert "今天天气非常好我们决定一起去郊外游玩顺便拍些照片" in content
+
+
+def test_need_split_off_keeps_lines_untouched(tmp_path):
+    """need_split off (the new default): the subtitle panel must NOT split
+    lines into words and must NOT run the LLM re-join stage — the output keeps
+    the original sentence boundaries."""
+    src = _make_srt(tmp_path)
+    out = tmp_path / "out.srt"
+    task = _make_task(str(src), str(out), need_split=False)
+
+    result = _run_thread(task)
+
+    assert "error" not in result, result.get("error")
+    assert "finished" in result
+    assert "update_all" not in result
+    content = out.read_text(encoding="utf-8")
+    assert content.count("-->") == 2
+    assert "今天天气非常好我们决定一起去郊外游玩顺便拍些照片" in content
+    # 完整句子保持完整,没有被拆成单字。
+    for line in ("今天天气非常好我们决定一起去郊外游玩顺便拍些照片",
+                 "到了目的地以后我们发现这里的风景比想象中还要漂亮很多"):
+        assert line in content
 
 
 def test_need_split_with_unreachable_llm_errors_before_splitting(tmp_path):

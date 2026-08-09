@@ -239,7 +239,10 @@ class Config(QConfig):
     # ------------------- 字幕配置 -------------------
     need_optimize = ConfigItem("Subtitle", "NeedOptimize", False, BoolValidator())
     need_translate = ConfigItem("Subtitle", "NeedTranslate", False, BoolValidator())
-    need_split = ConfigItem("Subtitle", "NeedSplit", True, BoolValidator())
+    # 字幕面板的"字幕分割"(LLM 智能断句)默认关闭:开启后会把字幕拆到字词级再
+    # 由 LLM 重新组句,这需要 LLM 且会改变原断句。视频对齐面板的断句由词级
+    # 转写驱动(video_align_need_split),不依赖本项。
+    need_split = ConfigItem("Subtitle", "NeedSplit", False, BoolValidator())
     # 视频对齐面板的"自动拆分字幕"开关：独立的词级时间戳偏好。它与字幕面板的
     # need_split（LLM 智能断句）语义不同，共用同一配置项会让一边的设置改变
     # 另一边行为（例如视频对齐面板开启拆分后，字幕面板被拆成逐词）。

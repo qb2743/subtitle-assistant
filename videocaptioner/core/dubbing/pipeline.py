@@ -644,6 +644,7 @@ class DubbingPipeline:
                 num_speakers=self.config.speaker_count,
                 language=language,
                 progress=lambda p, s: cb(3 + int(p) * 1 // 100, s),
+                # 说话人识别在隔离子进程中运行,原生崩溃只影响子进程,不会拖垮 GUI。
                 isolate_process=True,
             )
             speaker_labels = assign_speakers(segments, diarizations)

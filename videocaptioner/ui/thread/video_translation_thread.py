@@ -447,6 +447,7 @@ class VideoTranslationThread(QThread):
                 self.cfg_src.transcribe_language.value
             ),
             progress=lambda value, message: self.progress.emit(20 + value // 20, message),
+            # 说话人识别在隔离子进程中运行,原生崩溃只影响子进程,不会拖垮 GUI。
             isolate_process=True,
             cancelled=lambda: self._cancelled,
         )

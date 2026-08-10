@@ -237,7 +237,19 @@ def _diarize_worker(
     num_speakers: int,
     language: str,
     result_path: str,
+    stderr_path: Optional[str] = None,
 ) -> None:
+    # 原生崩溃(Python 段错误)时,faulthandler 会把调用栈写到 stderr 文件,
+    # 让父进程在子进程异常退出后能拼出真实崩溃原因。
+    fh_file = None
+    try:
+        if stderr_path:
+            import faulthandler
+
+            fh_file = open(stderr_path, "w", encoding="utf-8")
+            faulthandler.enable(file=fh_file)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         result = diarize(
             audio_path,
@@ -249,25 +261,48 @@ def _diarize_worker(
     except Exception as exc:  # noqa: BLE001
         logger.exception("说话人识别子进程失败: %s", exc)
         payload = {"result": [], "error": str(exc)}
+    finally:
+        # 关闭 faulthandler 文件句柄,避免 Windows 上句柄未释放导致父进程无法清理临时文件。
+        if fh_file is not None:
+            try:
+                import faulthandler
+
+                faulthandler.disable()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                fh_file.close()
+            except Exception:  # noqa: BLE001
+                pass
     Path(result_path).write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8"
     )
 
 
-def _diarize_in_subprocess(
+def _run_diarize_subprocess(
     audio_path: str,
     num_speakers: int,
     language: str,
     cancelled: Optional[Callable[[], bool]] = None,
-) -> List[dict]:
+) -> tuple[List[dict], bool]:
+    """在隔离子进程中执行一次说话人识别。
+
+    返回 ``(result, crashed_native)``;``crashed_native`` 为 True 表示子进程以
+    原生错误(进程崩溃而非 Python 异常)退出,调用方按需重试。
+    """
     result_file = tempfile.NamedTemporaryFile(
         suffix=".json", prefix="videocaptioner-diarization-", delete=False
     )
     result_file.close()
     result_path = Path(result_file.name)
+    stderr_file = tempfile.NamedTemporaryFile(
+        suffix=".log", prefix="videocaptioner-diarization-", delete=False
+    )
+    stderr_file.close()
+    stderr_path = Path(stderr_file.name)
     process = multiprocessing.get_context("spawn").Process(
         target=_diarize_worker,
-        args=(audio_path, num_speakers, language, str(result_path)),
+        args=(audio_path, num_speakers, language, str(result_path), str(stderr_path)),
     )
     process.daemon = True
     try:
@@ -282,14 +317,54 @@ def _diarize_in_subprocess(
         else:
             process.join()
         if process.exitcode != 0:
-            raise RuntimeError(f"说话人识别子进程异常退出: {process.exitcode}")
+            stderr_text = ""
+            try:
+                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                pass
+            detail = f"\n子进程 stderr:\n{stderr_text[-2000:]}" if stderr_text else ""
+            raise RuntimeError(
+                f"说话人识别子进程异常退出: {process.exitcode}{detail}"
+            )
         payload = json.loads(result_path.read_text(encoding="utf-8") or "{}")
         if payload.get("error"):
             raise RuntimeError(payload["error"])
-        return payload.get("result") or []
+        return payload.get("result") or [], False
     finally:
         process.close()
-        result_path.unlink(missing_ok=True)
+        for p in (result_path, stderr_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:  # Windows 上句柄可能短暂被占用,忽略即可
+                pass
+
+
+def _diarize_in_subprocess(
+    audio_path: str,
+    num_speakers: int,
+    language: str,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> List[dict]:
+    """在隔离子进程中执行说话人识别,原生崩溃时重试一次新子进程。
+
+    说话人识别在隔离子进程中运行,原生崩溃只影响子进程,不会拖垮主进程/GUI。
+    瞬时性的原生崩溃(如内存/负载波动)通过重试通常能恢复。
+    """
+    try:
+        return _run_diarize_subprocess(
+            audio_path, num_speakers, language, cancelled
+        )[0]
+    except RuntimeError as exc:
+        if "任务已取消" in str(exc):
+            raise
+        # 仅当子进程是原生崩溃(退出码非 0 且异常文本含"异常退出")时才重试,
+        # 避免放大模型缺失等确定性错误。
+        if "异常退出" not in str(exc):
+            raise
+        logger.warning("说话人识别子进程原生崩溃,重试一次: %s", exc)
+        return _run_diarize_subprocess(
+            audio_path, num_speakers, language, cancelled
+        )[0]
 
 
 def diarize(

@@ -228,21 +228,29 @@ class VideoTranslationThread(QThread):
         manual_review: bool = False,
         translation_review: bool = True,
         subtitle_action: str | None = None,
+        config_snapshot: object | None = None,
     ):
         super().__init__()
         self.video_path = str(video_path)
         self.manual_review = manual_review
         self.translation_review = translation_review
-        action = subtitle_action or str(cfg.subtitle_action.value or "translate")
+        # 批量任务传入入队时的配置快照，运行中不再读取全局 cfg；
+        # 单任务流程（视频对齐面板）不传则使用实时全局配置。
+        self.config_snapshot = config_snapshot
+        self.cfg_src = config_snapshot or cfg
+        action = subtitle_action or str(self.cfg_src.subtitle_action.value or "translate")
         self.subtitle_action = action if action in {"translate", "rewrite"} else "translate"
         snapshot_task = TaskFactory.create_subtitle_task(
-            self.video_path, self.video_path, need_next_task=False
+            self.video_path,
+            self.video_path,
+            need_next_task=False,
+            cfg_source=config_snapshot,
         )
         self.subtitle_config = snapshot_task.subtitle_config
         if self.subtitle_config:
             self.subtitle_config.subtitle_action = self.subtitle_action
         self.translate_original_subtitles = bool(
-            cfg.dubbing_translate_original_subtitles.value
+            self.cfg_src.dubbing_translate_original_subtitles.value
         )
         self._cancelled = False
         self._narrator_event = threading.Event()
@@ -268,9 +276,10 @@ class VideoTranslationThread(QThread):
         video = Path(self.video_path)
         if not video.is_file():
             raise ValueError("视频文件不存在")
+        cfg_src = self.cfg_src
         output_dir = _job_output_dir(
             video,
-            str(cfg.dubbing_output_dir.value or ""),
+            str(cfg_src.dubbing_output_dir.value or ""),
             self.subtitle_action,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -281,7 +290,8 @@ class VideoTranslationThread(QThread):
         trans_task = TaskFactory.create_transcribe_task(
             self.video_path,
             need_next_task=True,
-            need_word_time_stamp=cfg.video_align_need_split.value,
+            need_word_time_stamp=cfg_src.video_align_need_split.value,
+            cfg_source=self.config_snapshot,
         )
         trans_task.output_path = str(intermediate_dir / Path(trans_task.output_path).name)
         trans_result = self._run_child(
@@ -295,11 +305,11 @@ class VideoTranslationThread(QThread):
             shutil.copy2(source_subtitle, local_subtitle)
             source_subtitle = local_subtitle
 
-        if bool(cfg.dubbing_enable_diarization.value):
+        if bool(cfg_src.dubbing_enable_diarization.value):
             source_subtitle = self._prepare_narrator_filter(
                 source_subtitle,
                 video,
-                narrator_only=bool(cfg.dubbing_narrator_only.value),
+                narrator_only=bool(cfg_src.dubbing_narrator_only.value),
             )
         if self._cancelled:
             return
@@ -308,7 +318,10 @@ class VideoTranslationThread(QThread):
         action_label = "洗稿" if is_rewrite else "翻译"
         self.progress.emit(25, f"开始字幕{action_label}...")
         subtitle_task = TaskFactory.create_subtitle_task(
-            str(source_subtitle), self.video_path, need_next_task=False
+            str(source_subtitle),
+            self.video_path,
+            need_next_task=False,
+            cfg_source=self.config_snapshot,
         )
         subtitle_task.output_path = str(
             source_subtitle.with_name(
@@ -356,7 +369,9 @@ class VideoTranslationThread(QThread):
                 )
 
         self.progress.emit(60, "开始字幕配音与画面对齐...")
-        config = TaskFactory.create_dubbing_config(include_alignment_audio=True)
+        config = TaskFactory.create_dubbing_config(
+            include_alignment_audio=True, cfg_source=self.config_snapshot
+        )
         # 视频字幕处理必须按字幕时间轴对齐；配音面板的固定停顿模式会跳过视频变速。
         config.fixed_line_pause = False
         # 画面变速模式保留 TTS 自然语速，不再先做一轮音频加速。
@@ -427,9 +442,9 @@ class VideoTranslationThread(QThread):
             return source_subtitle
         diarizations = diarize(
             str(video),
-            num_speakers=int(cfg.dubbing_speaker_count.value or 0),
+            num_speakers=int(self.cfg_src.dubbing_speaker_count.value or 0),
             language=diarization_language_from_transcribe(
-                cfg.transcribe_language.value
+                self.cfg_src.transcribe_language.value
             ),
             progress=lambda value, message: self.progress.emit(20 + value // 20, message),
             isolate_process=True,
@@ -469,13 +484,15 @@ class VideoTranslationThread(QThread):
         dropped = report.get("dropped", [])
         llm_details: dict[int, dict] = {}
 
-        if narrator_only and bool(cfg.dubbing_narrator_llm_review.value) and dropped:
+        if narrator_only and bool(self.cfg_src.dubbing_narrator_llm_review.value) and dropped:
             try:
                 from videocaptioner.core.dubbing.narrator_llm_judge import judge_dropped
 
                 kept_segments = [segments[i] for i in kept]
                 dropped_segments = [segments[item["index"]] for item in dropped]
-                dubbing_config = TaskFactory.create_dubbing_config()
+                dubbing_config = TaskFactory.create_dubbing_config(
+                    cfg_source=self.config_snapshot
+                )
                 fields = (
                     dubbing_config.llm_api_key,
                     dubbing_config.llm_api_base,
@@ -570,7 +587,10 @@ class VideoTranslationThread(QThread):
         if not source_path.is_file() or not load_dubbing_segments(str(source_path)):
             return source_path
         subtitle_task = TaskFactory.create_subtitle_task(
-            str(source_path), self.video_path, need_next_task=False
+            str(source_path),
+            self.video_path,
+            need_next_task=False,
+            cfg_source=self.config_snapshot,
         )
         subtitle_task.output_path = str(
             source_path.with_name(source_path.stem + "-translated.srt")

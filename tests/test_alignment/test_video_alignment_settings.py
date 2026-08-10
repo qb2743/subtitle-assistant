@@ -843,7 +843,7 @@ def test_narrator_llm_review_receives_fresh_speaker_labels(tmp_path, monkeypatch
     monkeypatch.setattr(
         video_thread_module.TaskFactory,
         "create_dubbing_config",
-        lambda: SimpleNamespace(
+        lambda *_args, **_kwargs: SimpleNamespace(
             llm_api_key="key",
             llm_api_base="https://example.invalid/v1",
             llm_model="test-model",

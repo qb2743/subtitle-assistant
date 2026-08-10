@@ -17,7 +17,7 @@ from videocaptioner.core.entities import (
     TranscriptAndSubtitleTask,
 )
 from videocaptioner.core.llm.client import resolve_llm_base_url
-from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.common.config import Config, cfg
 from videocaptioner.ui.dubbing_config_builder import create_dubbing_config_from_cfg
 from videocaptioner.ui.dubbing_config_builder import (
     resolve_dubbing_voice as resolve_dubbing_voice,
@@ -38,19 +38,20 @@ class TaskFactory:
         return ""
 
     @staticmethod
-    def get_rounded_style() -> dict:
+    def get_rounded_style(cfg_source: Optional[Config] = None) -> dict:
         """获取圆角背景样式配置 (from UI cfg overrides)"""
+        cfg_src = cfg_source or cfg
         return {
-            "font_name": cfg.rounded_bg_font_name.value,
-            "font_size": cfg.rounded_bg_font_size.value,
-            "bg_color": cfg.rounded_bg_color.value,
-            "text_color": cfg.rounded_bg_text_color.value,
-            "corner_radius": cfg.rounded_bg_corner_radius.value,
-            "padding_h": cfg.rounded_bg_padding_h.value,
-            "padding_v": cfg.rounded_bg_padding_v.value,
-            "margin_bottom": cfg.rounded_bg_margin_bottom.value,
-            "line_spacing": cfg.rounded_bg_line_spacing.value,
-            "letter_spacing": cfg.rounded_bg_letter_spacing.value,
+            "font_name": cfg_src.rounded_bg_font_name.value,
+            "font_size": cfg_src.rounded_bg_font_size.value,
+            "bg_color": cfg_src.rounded_bg_color.value,
+            "text_color": cfg_src.rounded_bg_text_color.value,
+            "corner_radius": cfg_src.rounded_bg_corner_radius.value,
+            "padding_h": cfg_src.rounded_bg_padding_h.value,
+            "padding_v": cfg_src.rounded_bg_padding_v.value,
+            "margin_bottom": cfg_src.rounded_bg_margin_bottom.value,
+            "line_spacing": cfg_src.rounded_bg_line_spacing.value,
+            "letter_spacing": cfg_src.rounded_bg_letter_spacing.value,
         }
 
     @staticmethod
@@ -59,6 +60,7 @@ class TaskFactory:
         need_next_task: bool = False,
         task_id: Optional[str] = None,
         need_word_time_stamp: Optional[bool] = None,
+        cfg_source: Optional[Config] = None,
     ) -> TranscribeTask:
         """创建转录任务
 
@@ -69,47 +71,50 @@ class TaskFactory:
             need_word_time_stamp: 词级时间戳开关。None 时按默认语义取
                 cfg.need_split(供字幕智能断句使用);视频对齐面板等独立流程
                 可显式传入自己的开关,避免与字幕面板设置互相影响。
+            cfg_source: 配置来源；批量任务传 ConfigSnapshot 固定入队时的
+                设置，默认 None 使用全局 cfg（实时值）。
         """
         # 获取文件名
         file_name = Path(file_path).stem
+        cfg_src = cfg_source or cfg
 
         # 构建输出路径
         if need_next_task:
             if need_word_time_stamp is None:
-                need_word_time_stamp = cfg.need_split.value
+                need_word_time_stamp = cfg_src.need_split.value
             output_path = str(
-                Path(cfg.work_dir.value)
+                Path(cfg_src.work_dir.value)
                 / file_name
                 / "subtitle"
-                / f"【原始字幕】{file_name}-{cfg.transcribe_model.value.value}-{cfg.transcribe_language.value.value}.srt"
+                / f"【原始字幕】{file_name}-{cfg_src.transcribe_model.value.value}-{cfg_src.transcribe_language.value.value}.srt"
             )
         else:
             need_word_time_stamp = False
             output_path = str(Path(file_path).parent / f"{file_name}.srt")
 
         config = TranscribeConfig(
-            transcribe_model=cfg.transcribe_model.value,
-            transcribe_language=LANGUAGES[cfg.transcribe_language.value.value],
+            transcribe_model=cfg_src.transcribe_model.value,
+            transcribe_language=LANGUAGES[cfg_src.transcribe_language.value.value],
             need_word_time_stamp=need_word_time_stamp,
-            output_format=cfg.transcribe_output_format.value,
+            output_format=cfg_src.transcribe_output_format.value,
             # Whisper Cpp 配置
-            whisper_model=cfg.whisper_model.value,
+            whisper_model=cfg_src.whisper_model.value,
             # Whisper API 配置
-            whisper_api_key=cfg.whisper_api_key.value,
-            whisper_api_base=cfg.whisper_api_base.value,
-            whisper_api_model=cfg.whisper_api_model.value,
-            whisper_api_prompt=cfg.whisper_api_prompt.value,
+            whisper_api_key=cfg_src.whisper_api_key.value,
+            whisper_api_base=cfg_src.whisper_api_base.value,
+            whisper_api_model=cfg_src.whisper_api_model.value,
+            whisper_api_prompt=cfg_src.whisper_api_prompt.value,
             # Faster Whisper 配置
-            faster_whisper_program=cfg.faster_whisper_program.value,
-            faster_whisper_model=cfg.faster_whisper_model.value,
+            faster_whisper_program=cfg_src.faster_whisper_program.value,
+            faster_whisper_model=cfg_src.faster_whisper_model.value,
             faster_whisper_model_dir=str(MODEL_PATH),
-            faster_whisper_device=cfg.faster_whisper_device.value,
-            faster_whisper_vad_filter=cfg.faster_whisper_vad_filter.value,
-            faster_whisper_vad_threshold=cfg.faster_whisper_vad_threshold.value,
-            faster_whisper_vad_method=cfg.faster_whisper_vad_method.value,
-            faster_whisper_ff_mdx_kim2=cfg.faster_whisper_ff_mdx_kim2.value,
-            faster_whisper_one_word=cfg.faster_whisper_one_word.value,
-            faster_whisper_prompt=cfg.faster_whisper_prompt.value,
+            faster_whisper_device=cfg_src.faster_whisper_device.value,
+            faster_whisper_vad_filter=cfg_src.faster_whisper_vad_filter.value,
+            faster_whisper_vad_threshold=cfg_src.faster_whisper_vad_threshold.value,
+            faster_whisper_vad_method=cfg_src.faster_whisper_vad_method.value,
+            faster_whisper_ff_mdx_kim2=cfg_src.faster_whisper_ff_mdx_kim2.value,
+            faster_whisper_one_word=cfg_src.faster_whisper_one_word.value,
+            faster_whisper_prompt=cfg_src.faster_whisper_prompt.value,
         )
 
         task = TranscribeTask(
@@ -129,8 +134,15 @@ class TaskFactory:
         video_path: Optional[str] = None,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        cfg_source: Optional[Config] = None,
     ) -> SubtitleTask:
-        """创建字幕任务"""
+        """创建字幕任务
+
+        Args:
+            cfg_source: 配置来源；批量任务传 ConfigSnapshot 固定入队时的
+                设置，默认 None 使用全局 cfg（实时值）。
+        """
+        cfg_src = cfg_source or cfg
         output_name = (
             Path(file_path).stem.replace("【原始字幕】", "").replace("【下载字幕】", "")
         )
@@ -138,10 +150,10 @@ class TaskFactory:
         suffix = (
             (
                 "-LLM 大模型洗稿"
-                if cfg.subtitle_action.value == "rewrite"
-                else f"-{cfg.translator_service.value.value}"
+                if cfg_src.subtitle_action.value == "rewrite"
+                else f"-{cfg_src.translator_service.value.value}"
             )
-            if cfg.need_translate.value
+            if cfg_src.need_translate.value
             else ""
         )
 
@@ -155,39 +167,39 @@ class TaskFactory:
             )
 
         # 根据当前选择的LLM服务获取对应的配置
-        current_service = cfg.llm_service.value
+        current_service = cfg_src.llm_service.value
         if current_service == LLMServiceEnum.OPENAI:
-            base_url = cfg.openai_api_base.value
-            api_key = cfg.openai_api_key.value
-            llm_model = cfg.openai_model.value
+            base_url = cfg_src.openai_api_base.value
+            api_key = cfg_src.openai_api_key.value
+            llm_model = cfg_src.openai_model.value
         elif current_service == LLMServiceEnum.SILICON_CLOUD:
-            base_url = cfg.silicon_cloud_api_base.value
-            api_key = cfg.silicon_cloud_api_key.value
-            llm_model = cfg.silicon_cloud_model.value
+            base_url = cfg_src.silicon_cloud_api_base.value
+            api_key = cfg_src.silicon_cloud_api_key.value
+            llm_model = cfg_src.silicon_cloud_model.value
         elif current_service == LLMServiceEnum.DEEPSEEK:
-            base_url = cfg.deepseek_api_base.value
-            api_key = cfg.deepseek_api_key.value
-            llm_model = cfg.deepseek_model.value
+            base_url = cfg_src.deepseek_api_base.value
+            api_key = cfg_src.deepseek_api_key.value
+            llm_model = cfg_src.deepseek_model.value
         elif current_service == LLMServiceEnum.OLLAMA:
-            base_url = cfg.ollama_api_base.value
-            api_key = cfg.ollama_api_key.value
-            llm_model = cfg.ollama_model.value
+            base_url = cfg_src.ollama_api_base.value
+            api_key = cfg_src.ollama_api_key.value
+            llm_model = cfg_src.ollama_model.value
         elif current_service == LLMServiceEnum.LM_STUDIO:
-            base_url = cfg.lm_studio_api_base.value
-            api_key = cfg.lm_studio_api_key.value
-            llm_model = cfg.lm_studio_model.value
+            base_url = cfg_src.lm_studio_api_base.value
+            api_key = cfg_src.lm_studio_api_key.value
+            llm_model = cfg_src.lm_studio_model.value
         elif current_service == LLMServiceEnum.GEMINI:
-            base_url = cfg.gemini_api_base.value
-            api_key = cfg.gemini_api_key.value
-            llm_model = cfg.gemini_model.value
+            base_url = cfg_src.gemini_api_base.value
+            api_key = cfg_src.gemini_api_key.value
+            llm_model = cfg_src.gemini_model.value
         elif current_service == LLMServiceEnum.CHATGLM:
-            base_url = cfg.chatglm_api_base.value
-            api_key = cfg.chatglm_api_key.value
-            llm_model = cfg.chatglm_model.value
+            base_url = cfg_src.chatglm_api_base.value
+            api_key = cfg_src.chatglm_api_key.value
+            llm_model = cfg_src.chatglm_model.value
         elif current_service == LLMServiceEnum.ANTHROPIC:
-            base_url = cfg.anthropic_api_base.value
-            api_key = cfg.anthropic_api_key.value
-            llm_model = cfg.anthropic_model.value
+            base_url = cfg_src.anthropic_api_base.value
+            api_key = cfg_src.anthropic_api_key.value
+            llm_model = cfg_src.anthropic_model.value
         else:
             base_url = ""
             api_key = ""
@@ -200,30 +212,30 @@ class TaskFactory:
             base_url=base_url,
             api_key=api_key,
             llm_model=llm_model,
-            deeplx_endpoint=cfg.deeplx_endpoint.value,
+            deeplx_endpoint=cfg_src.deeplx_endpoint.value,
             # 翻译服务
-            translator_service=cfg.translator_service.value,
+            translator_service=cfg_src.translator_service.value,
             # 字幕处理
-            need_reflect=cfg.need_reflect_translate.value,
-            need_translate=cfg.need_translate.value,
-            need_optimize=cfg.need_optimize.value,
-            thread_num=cfg.thread_num.value,
-            batch_size=cfg.batch_size.value,
-            translation_mode=cfg.translation_mode.value,
-            subtitle_action=cfg.subtitle_action.value,
+            need_reflect=cfg_src.need_reflect_translate.value,
+            need_translate=cfg_src.need_translate.value,
+            need_optimize=cfg_src.need_optimize.value,
+            thread_num=cfg_src.thread_num.value,
+            batch_size=cfg_src.batch_size.value,
+            translation_mode=cfg_src.translation_mode.value,
+            subtitle_action=cfg_src.subtitle_action.value,
             # 字幕布局、样式
-            subtitle_layout=cfg.subtitle_layout.value,  # Now returns SubtitleLayoutEnum
-            subtitle_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value),
+            subtitle_layout=cfg_src.subtitle_layout.value,  # Now returns SubtitleLayoutEnum
+            subtitle_style=TaskFactory.get_ass_style(cfg_src.subtitle_style_name.value),
             # 字幕分割
-            max_word_count_cjk=cfg.max_word_count_cjk.value,
-            max_word_count_english=cfg.max_word_count_english.value,
-            need_split=cfg.need_split.value,
+            max_word_count_cjk=cfg_src.max_word_count_cjk.value,
+            max_word_count_english=cfg_src.max_word_count_english.value,
+            need_split=cfg_src.need_split.value,
             # 字幕翻译
-            target_language=cfg.target_language.value,
+            target_language=cfg_src.target_language.value,
             # 字幕提示
-            translation_prompt_text=cfg.translation_prompt_text.value,
-            rewrite_prompt_text=cfg.rewrite_prompt_text.value,
-            custom_prompt_text=cfg.custom_prompt_text.value,
+            translation_prompt_text=cfg_src.translation_prompt_text.value,
+            rewrite_prompt_text=cfg_src.rewrite_prompt_text.value,
+            custom_prompt_text=cfg_src.custom_prompt_text.value,
         )
 
         task = SubtitleTask(
@@ -244,22 +256,29 @@ class TaskFactory:
         subtitle_path: str,
         need_next_task: bool = False,
         task_id: Optional[str] = None,
+        cfg_source: Optional[Config] = None,
     ) -> SynthesisTask:
-        """创建视频合成任务"""
+        """创建视频合成任务
+
+        Args:
+            cfg_source: 配置来源；批量任务传 ConfigSnapshot 固定入队时的
+                设置，默认 None 使用全局 cfg（实时值）。
+        """
+        cfg_src = cfg_source or cfg
         output_path = str(
             Path(video_path).parent / f"【卡卡】{Path(video_path).stem}.mp4"
         )
 
         # 只有启用样式时才传入样式配置
-        use_style = cfg.use_subtitle_style.value
+        use_style = cfg_src.use_subtitle_style.value
         config = SynthesisConfig(
-            need_video=cfg.need_video.value,
-            soft_subtitle=cfg.soft_subtitle.value,
-            render_mode=cfg.subtitle_render_mode.value,
-            video_quality=cfg.video_quality.value,
-            subtitle_layout=cfg.subtitle_layout.value,
-            ass_style=TaskFactory.get_ass_style(cfg.subtitle_style_name.value) if use_style else "",
-            rounded_style=TaskFactory.get_rounded_style() if use_style else None,
+            need_video=cfg_src.need_video.value,
+            soft_subtitle=cfg_src.soft_subtitle.value,
+            render_mode=cfg_src.subtitle_render_mode.value,
+            video_quality=cfg_src.video_quality.value,
+            subtitle_layout=cfg_src.subtitle_layout.value,
+            ass_style=TaskFactory.get_ass_style(cfg_src.subtitle_style_name.value) if use_style else "",
+            rounded_style=TaskFactory.get_rounded_style(cfg_source) if use_style else None,
         )
 
         task = SynthesisTask(
@@ -317,9 +336,16 @@ class TaskFactory:
     @staticmethod
     def create_dubbing_config(
         include_alignment_audio: bool = False,
+        cfg_source: Optional[Config] = None,
     ) -> DubbingConfig:
-        """从配音面板全局 cfg 创建配置（与 CLI dub 命令字段对齐）。"""
+        """从配音面板全局 cfg 创建配置（与 CLI dub 命令字段对齐）。
+
+        Args:
+            cfg_source: 配置来源；批量任务传 ConfigSnapshot 固定入队时的
+                设置，默认 None 使用全局 cfg（实时值）。
+        """
         return create_dubbing_config_from_cfg(
-            include_alignment_audio=include_alignment_audio
+            include_alignment_audio=include_alignment_audio,
+            cfg_source=cfg_source,
         )
 

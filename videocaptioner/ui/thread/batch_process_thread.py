@@ -13,6 +13,7 @@ from videocaptioner.core.entities import (
     TranscribeTask,
 )
 from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.ui.common.config_snapshot import ConfigSnapshot
 from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.dubbing_thread import DubbingThread
 from videocaptioner.ui.thread.subtitle_thread import SubtitleThread
@@ -32,6 +33,10 @@ class BatchTask:
         self.error_message = ""
         self.current_thread: Optional[QThread] = None
         self.cancelled = False
+        # 入队（点击开始）时的全局配置快照。批处理过程中每个视频的任务
+        # 配置都从快照读取，而不是运行时读取全局 cfg——避免批量运行期间
+        # 修改字幕面板设置（目标语言等）影响队列中尚未处理的任务。
+        self.config_snapshot: Optional[ConfigSnapshot] = None
 
 
 class BatchProcessThread(QThread):
@@ -54,6 +59,9 @@ class BatchProcessThread(QThread):
     def add_task(self, task: BatchTask):
         with self._state_lock:
             self.threads = [thread for thread in self.threads if thread.isRunning()]
+            # 入队即固定当时的全局配置，之后任务不再受面板设置变动影响
+            if task.config_snapshot is None:
+                task.config_snapshot = ConfigSnapshot()
             self.task_queue.put(task)
             self.current_tasks[task.file_path] = task
             self.is_running = True
@@ -158,7 +166,9 @@ class BatchProcessThread(QThread):
 
     def _handle_transcribe_task(self, batch_task: BatchTask):
         # self.max_concurrent_tasks = 3
-        task = self.factory.create_transcribe_task(batch_task.file_path)
+        task = self.factory.create_transcribe_task(
+            batch_task.file_path, cfg_source=batch_task.config_snapshot
+        )
         thread = TranscriptThread(task)
         batch_task.current_thread = thread
 
@@ -180,7 +190,9 @@ class BatchProcessThread(QThread):
     def _handle_subtitle_task(self, batch_task: BatchTask):
         logger.info(f"开始处理字幕任务: {batch_task.file_path}")
 
-        task = self.factory.create_subtitle_task(batch_task.file_path)
+        task = self.factory.create_subtitle_task(
+            batch_task.file_path, cfg_source=batch_task.config_snapshot
+        )
         thread = SubtitleThread(task)
         batch_task.current_thread = thread
 
@@ -203,8 +215,10 @@ class BatchProcessThread(QThread):
         """处理配音任务"""
         logger.info(f"开始处理配音任务: {batch_task.file_path}")
 
-        # 从工厂创建配音配置
-        config = self.factory.create_dubbing_config()
+        # 从工厂创建配音配置（使用入队时的配置快照）
+        config = self.factory.create_dubbing_config(
+            cfg_source=batch_task.config_snapshot
+        )
 
         # 检查是否有同名视频文件（用于合成配音视频）
         video_path = None
@@ -236,7 +250,9 @@ class BatchProcessThread(QThread):
 
     def _handle_trans_sub_task(self, batch_task: BatchTask):
         trans_task = self.factory.create_transcribe_task(
-            batch_task.file_path, need_next_task=True
+            batch_task.file_path,
+            need_next_task=True,
+            cfg_source=batch_task.config_snapshot,
         )
         thread = TranscriptThread(trans_task)
         batch_task.current_thread = thread
@@ -275,7 +291,10 @@ class BatchProcessThread(QThread):
         if not task.output_path:
             raise ValueError("Task output_path is None")
         subtitle_task = self.factory.create_subtitle_task(
-            task.output_path, batch_task.file_path, need_next_task=True
+            task.output_path,
+            batch_task.file_path,
+            need_next_task=True,
+            cfg_source=batch_task.config_snapshot,
         )
         thread = SubtitleThread(subtitle_task)
         batch_task.current_thread = thread
@@ -302,7 +321,9 @@ class BatchProcessThread(QThread):
     def _handle_full_process_task(self, batch_task: BatchTask):
         # 首先创建转录任务
         trans_task = self.factory.create_transcribe_task(
-            batch_task.file_path, need_next_task=True
+            batch_task.file_path,
+            need_next_task=True,
+            cfg_source=batch_task.config_snapshot,
         )
         thread = TranscriptThread(trans_task)
         batch_task.current_thread = thread
@@ -322,6 +343,7 @@ class BatchProcessThread(QThread):
             batch_task.file_path,
             manual_review=False,
             translation_review=False,
+            config_snapshot=batch_task.config_snapshot,
         )
         batch_task.current_thread = thread
         self.threads.append(thread)
@@ -352,6 +374,7 @@ class BatchProcessThread(QThread):
             task.output_path,
             batch_task.file_path,
             need_next_task=True,
+            cfg_source=batch_task.config_snapshot,
         )
         thread = SubtitleThread(subtitle_task)
         batch_task.current_thread = thread
@@ -387,7 +410,9 @@ class BatchProcessThread(QThread):
             return
 
         # 字幕完成后创建视频合成任务
-        synthesis_task = self.factory.create_synthesis_task(video_path, subtitle_path)
+        synthesis_task = self.factory.create_synthesis_task(
+            video_path, subtitle_path, cfg_source=batch_task.config_snapshot
+        )
         thread = VideoSynthesisThread(synthesis_task)
         batch_task.current_thread = thread
 

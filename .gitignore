@@ -57,6 +57,7 @@ secrets.*
 /test_*.py
 /archive/
 /.workbuddy/
+/.zcode/
 /dubbing/
 /3.mp3
 /3.txt

@@ -8,7 +8,7 @@ import functools
 import hashlib
 import json
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import Any, Dict, Iterable, Optional
 
 from diskcache import Cache
 
@@ -42,6 +42,15 @@ _tts_cache = Cache(str(CACHE_PATH / "tts_audio"))
 _translate_cache = Cache(str(CACHE_PATH / "translate_results"))
 _version_state_cache = Cache(str(CACHE_PATH / "version_state"))
 
+# Registry of all caches for convenient batch operations (e.g. one-click clear)
+ALL_CACHES = {
+    "llm_translation": _llm_cache,
+    "asr_results": _asr_cache,
+    "tts_audio": _tts_cache,
+    "translate_results": _translate_cache,
+    "version_state": _version_state_cache,
+}
+
 
 def get_llm_cache() -> Cache:
     """Get LLM translation cache instance."""
@@ -66,6 +75,21 @@ def get_tts_cache() -> Cache:
 def get_version_state_cache() -> Cache:
     """Get version check state cache instance."""
     return _version_state_cache
+
+
+def clear_caches(names: Optional[Iterable[str]] = None) -> Dict[str, int]:
+    """Clear disk caches.
+
+    Args:
+        names: Iterable of cache names to clear (keys of ``ALL_CACHES``).
+            Defaults to None, which clears all caches.
+
+    Returns:
+        Dict mapping cache name -> number of entries removed.
+    """
+    if names is None:
+        names = list(ALL_CACHES)
+    return {name: ALL_CACHES[name].clear() for name in names}
 
 
 def memoize(cache_instance: Cache, **kwargs):

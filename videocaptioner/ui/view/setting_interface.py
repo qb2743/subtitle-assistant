@@ -9,6 +9,7 @@ from qfluentwidgets import (
     ExpandLayout,
     HyperlinkCard,
     InfoBar,
+    MessageBox,
     OptionsSettingCard,
     PrimaryPushSettingCard,
     PushSettingCard,
@@ -30,7 +31,7 @@ from videocaptioner.core.constant import (
 from videocaptioner.core.entities import LLMServiceEnum, TranscribeModelEnum, TranslatorServiceEnum
 from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
-from videocaptioner.core.utils.cache import disable_cache, enable_cache
+from videocaptioner.core.utils.cache import clear_caches, disable_cache, enable_cache
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.EditComboBoxSettingCard import EditComboBoxSettingCard
@@ -174,6 +175,13 @@ class SettingInterface(ScrollArea):
             cfg.cache_enabled,
             self.personalGroup,
         )
+        self.clearCacheCard = PushSettingCard(
+            self.tr("清理缓存"),
+            FIF.DELETE,
+            self.tr("一键清理缓存"),
+            self.tr("删除 LLM、翻译、ASR、TTS 等所有缓存文件"),
+            self.saveGroup,
+        )
         self.themeCard = OptionsSettingCard(
             cfg.themeMode,
             FIF.BRUSH,
@@ -248,6 +256,7 @@ class SettingInterface(ScrollArea):
 
         self.saveGroup.addSettingCard(self.savePathCard)
         self.saveGroup.addSettingCard(self.cacheEnabledCard)
+        self.saveGroup.addSettingCard(self.clearCacheCard)
 
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
@@ -686,6 +695,7 @@ class SettingInterface(ScrollArea):
 
         # 个性化
         self.cacheEnabledCard.checkedChanged.connect(self.__onCacheEnabledChanged)
+        self.clearCacheCard.clicked.connect(self.__onClearCacheClicked)
         self.themeCard.optionChanged.connect(lambda ci: setTheme(cfg.get(ci)))
         self.themeColorCard.colorChanged.connect(setThemeColor)
 
@@ -749,6 +759,32 @@ class SettingInterface(ScrollArea):
                 self.tr("缓存已禁用"),
                 self.tr("所有操作将重新生成，不使用缓存（建议开启缓存）"),
                 duration=INFOBAR_DURATION_WARNING,
+                parent=self,
+            )
+
+    def __onClearCacheClicked(self):
+        """处理清理缓存按钮点击"""
+        w = MessageBox(
+            self.tr("确认清理缓存"),
+            self.tr("确定要清空所有缓存吗？将删除 LLM、翻译、ASR、TTS 等缓存文件，此操作不可恢复。"),
+            self,
+        )
+        if not w.exec():
+            return
+        try:
+            cleared = clear_caches()
+            total = sum(cleared.values())
+            InfoBar.success(
+                self.tr("缓存已清理"),
+                self.tr(f"已清理 {total} 条缓存数据"),
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+        except Exception as e:
+            InfoBar.error(
+                self.tr("清理缓存失败"),
+                str(e),
+                duration=INFOBAR_DURATION_ERROR,
                 parent=self,
             )
 

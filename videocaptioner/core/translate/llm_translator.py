@@ -13,7 +13,11 @@ from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.llm import call_llm
 from videocaptioner.core.prompts import get_prompt
 from videocaptioner.core.translate.base import BaseTranslator, SubtitleProcessData, logger
-from videocaptioner.core.translate.types import TargetLanguage
+from videocaptioner.core.translate.types import (
+    TargetLanguage,
+    script_family,
+    text_matches_target_language,
+)
 from videocaptioner.core.utils.cache import generate_cache_key, is_cache_enabled
 
 
@@ -141,13 +145,12 @@ class LLMTranslator(BaseTranslator):
                 continue
             normalized_original = self._normalize_for_compare(original)
             normalized_translated = self._normalize_for_compare(translated)
-            if not self.is_rewrite and (
-                self.target_language
-                not in {
-                    TargetLanguage.ENGLISH,
-                    TargetLanguage.ENGLISH_US,
-                    TargetLanguage.ENGLISH_UK,
-                }
+            # 仅当原文本身已是目标语言（文字体系一致）时，译文==原文才算合理；
+            # 否则说明翻译没有发生，必须计为失败。此前按"目标语言是否英语"
+            # 豁免，导致中文源+英语目标时被原样返回的中文不报错、成片仍是中文。
+            if (
+                not self.is_rewrite
+                and not text_matches_target_language(original, self.target_language)
                 and normalized_original == normalized_translated
             ):
                 failed += 1
@@ -164,7 +167,7 @@ class LLMTranslator(BaseTranslator):
         ):
             sample = ", ".join(str(i) for i in unchanged_rewrite_indexes[:10])
             raise RuntimeError(
-                f"Rewrite returned the original text for "
+                f"Rewrite returned the original text or changed the language for "
                 f"{len(unchanged_rewrite_indexes)}/{total} rows "
                 f"({unchanged_ratio:.0%}). Unchanged indexes: {sample}."
             )
@@ -535,16 +538,32 @@ class LLMTranslator(BaseTranslator):
         if "||ERROR" in translated:
             return True
 
-        if not self.is_rewrite and self.target_language not in {
-            TargetLanguage.ENGLISH,
-            TargetLanguage.ENGLISH_US,
-            TargetLanguage.ENGLISH_UK,
-        } and self._normalize_for_compare(original) == self._normalize_for_compare(
-            translated
+        # 与 _guard_translation_quality 同一套判定：只有原文本身已是目标语言时，
+        # 译文==原文才可接受；否则视为翻译失败并重试。
+        if (
+            not self.is_rewrite
+            and not text_matches_target_language(original, self.target_language)
+            and self._normalize_for_compare(original)
+            == self._normalize_for_compare(translated)
         ):
             return self._has_translatable_content(original)
 
+        # 洗稿必须保持原语言：若输出的文字家族与原文不同（如英文解说被改写成中文），
+        # 说明模型把洗稿做成了翻译，需要重试而不是静默采用。
+        if self.is_rewrite and self._script_family_mismatch(original, translated):
+            return self._has_translatable_content(original)
+
         return False
+
+    @staticmethod
+    def _script_family_mismatch(original: str, translated: str) -> bool:
+        original_family = script_family(original)
+        translated_family = script_family(translated)
+        return (
+            original_family is not None
+            and translated_family is not None
+            and original_family != translated_family
+        )
 
     @staticmethod
     def _normalize_for_compare(text: str) -> str:
@@ -557,6 +576,7 @@ class LLMTranslator(BaseTranslator):
     def _rewrite_noop_details(
         self, result: List[SubtitleProcessData]
     ) -> Tuple[int, List[int]]:
+        """统计无效洗稿行：原样返回，或被改写成了另一种语言（如英文→中文）。"""
         if not self.is_rewrite:
             return 0, []
         total = 0
@@ -567,10 +587,13 @@ class LLMTranslator(BaseTranslator):
                 continue
             total += 1
             normalized = self._normalize_for_compare(original)
-            if (
+            same_text = (
                 len(normalized) >= self.REWRITE_NOOP_MIN_LENGTH
                 and normalized
                 == self._normalize_for_compare((data.translated_text or "").strip())
+            )
+            if same_text or self._script_family_mismatch(
+                original, (data.translated_text or "").strip()
             ):
                 unchanged.append(data.index)
         return total, unchanged

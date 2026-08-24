@@ -1,6 +1,8 @@
 """翻译器类型枚举"""
 
+import re
 from enum import Enum
+from typing import Optional
 
 
 class TranslatorType(Enum):
@@ -224,3 +226,102 @@ def get_language_code(target_language: TargetLanguage, translator_type: str) -> 
 
     # 默认返回简体中文
     return mapping.get(TargetLanguage.SIMPLIFIED_CHINESE, "zh-CN")
+
+
+# 各文字体系的字符范围（用于判定文本主体使用哪种文字）
+_SCRIPT_PATTERNS = {
+    "latin": re.compile(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]"),
+    "han": re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]"),
+    "kana": re.compile(r"[\u3040-\u30ff]"),
+    "hangul": re.compile(r"[\uac00-\ud7af\u1100-\u11ff]"),
+    "cyrillic": re.compile(r"[\u0400-\u04ff]"),
+    "greek": re.compile(r"[\u0370-\u03ff]"),
+    "arabic": re.compile(r"[\u0600-\u06ff\u0750-\u077f]"),
+    "hebrew": re.compile(r"[\u0590-\u05ff]"),
+    "thai": re.compile(r"[\u0e00-\u0e7f]"),
+}
+
+# 文字体系 → 文字家族。汉字与假名同属 CJK 家族：日文大量使用汉字，
+# 纯汉字文本无法区分中/日，按家族比较可避免日文洗稿被误判为改换语言。
+_SCRIPT_FAMILY_OF = {
+    "latin": "latin",
+    "han": "cjk",
+    "kana": "cjk",
+    "hangul": "hangul",
+    "cyrillic": "cyrillic",
+    "greek": "greek",
+    "arabic": "arabic",
+    "hebrew": "hebrew",
+    "thai": "thai",
+}
+
+# 目标语言 → 该语言正常书写所属的文字家族
+_LANGUAGE_SCRIPTS = {
+    TargetLanguage.SIMPLIFIED_CHINESE: {"cjk"},
+    TargetLanguage.TRADITIONAL_CHINESE: {"cjk"},
+    TargetLanguage.CANTONESE: {"cjk"},
+    TargetLanguage.JAPANESE: {"cjk"},
+    TargetLanguage.KOREAN: {"hangul"},
+    TargetLanguage.THAI: {"thai"},
+    TargetLanguage.ENGLISH: {"latin"},
+    TargetLanguage.ENGLISH_US: {"latin"},
+    TargetLanguage.ENGLISH_UK: {"latin"},
+    TargetLanguage.VIETNAMESE: {"latin"},
+    TargetLanguage.INDONESIAN: {"latin"},
+    TargetLanguage.MALAY: {"latin"},
+    TargetLanguage.TAGALOG: {"latin"},
+    TargetLanguage.FRENCH: {"latin"},
+    TargetLanguage.GERMAN: {"latin"},
+    TargetLanguage.SPANISH: {"latin"},
+    TargetLanguage.SPANISH_LATAM: {"latin"},
+    TargetLanguage.PORTUGUESE: {"latin"},
+    TargetLanguage.PORTUGUESE_BR: {"latin"},
+    TargetLanguage.PORTUGUESE_PT: {"latin"},
+    TargetLanguage.ITALIAN: {"latin"},
+    TargetLanguage.DUTCH: {"latin"},
+    TargetLanguage.POLISH: {"latin"},
+    TargetLanguage.TURKISH: {"latin"},
+    TargetLanguage.CZECH: {"latin"},
+    TargetLanguage.SWEDISH: {"latin"},
+    TargetLanguage.DANISH: {"latin"},
+    TargetLanguage.FINNISH: {"latin"},
+    TargetLanguage.NORWEGIAN: {"latin"},
+    TargetLanguage.HUNGARIAN: {"latin"},
+    TargetLanguage.ROMANIAN: {"latin"},
+    TargetLanguage.RUSSIAN: {"cyrillic"},
+    TargetLanguage.UKRAINIAN: {"cyrillic"},
+    TargetLanguage.BULGARIAN: {"cyrillic"},
+    TargetLanguage.GREEK: {"greek"},
+    TargetLanguage.ARABIC: {"arabic"},
+    TargetLanguage.PERSIAN: {"arabic"},
+    TargetLanguage.HEBREW: {"hebrew"},
+}
+
+
+def script_family(text: str) -> Optional[str]:
+    """返回文本的主体文字家族（latin/cjk/hangul/cyrillic 等）。
+
+    无字母文本（纯标点/数字/空白）返回 None。
+    """
+    counts = {
+        name: len(pattern.findall(text)) for name, pattern in _SCRIPT_PATTERNS.items()
+    }
+    total = sum(counts.values())
+    if total == 0:
+        return None
+    dominant = max(counts, key=counts.get)
+    return _SCRIPT_FAMILY_OF[dominant]
+
+
+def text_matches_target_language(text: str, target_language: TargetLanguage) -> bool:
+    """判断文本的主体文字家族是否属于目标语言。
+
+    用于区分两种“译文与原文相同”的情形：
+    - 原文本身就是目标语言（如英语视频配英语字幕），未改动是合理的；
+    - 翻译根本没有发生（如中文原文被 LLM 原样返回），必须视为失败。
+    """
+    allowed = _LANGUAGE_SCRIPTS.get(target_language)
+    if not allowed:
+        return False
+    family = script_family(text)
+    return family is not None and family in allowed

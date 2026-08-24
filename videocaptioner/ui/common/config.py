@@ -246,8 +246,9 @@ class Config(QConfig):
     # 视频对齐面板的"自动拆分字幕"开关：独立的词级时间戳偏好。它与字幕面板的
     # need_split（LLM 智能断句）语义不同，共用同一配置项会让一边的设置改变
     # 另一边行为（例如视频对齐面板开启拆分后，字幕面板被拆成逐词）。
+    # 默认关闭：开启会要求词级时间戳，进而触发 LLM 断句（依赖 LLM 配置）。
     video_align_need_split = ConfigItem(
-        "VideoAlign", "NeedSplit", True, BoolValidator()
+        "VideoAlign", "NeedSplit", False, BoolValidator()
     )
     target_language = OptionsConfigItem(
         "Subtitle",

@@ -9,8 +9,27 @@ ChatCompletion 对象。本模块提供 SSE 解析和响应内容提取的共享
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from typing import Optional, Tuple
+
+# 误配置的代理/服务在不可用时返回的 HTML 兜底页（如 Vite 的 index.html）。
+# 这类内容绝不能被当作字幕/翻译结果，否则会被烧录进视频。
+_HTML_MARKER_RE = re.compile(r"<!doctype\s+html|<html[\s>]", re.IGNORECASE)
+
+
+def _guard_llm_content(content: Optional[str]) -> Optional[str]:
+    """拒绝把 HTML 错误页/兜底页当作 LLM 正文。
+
+    返回 None 表示"无有效内容"，让上层走报错或降级逻辑，而不是把 HTML
+    当作翻译/断句结果写入字幕。
+    """
+    if not content:
+        return None
+    stripped = content.strip()
+    if _HTML_MARKER_RE.search(stripped):
+        return None
+    return stripped
 
 
 def parse_sse_string(text: str) -> Tuple[bool, Optional[str]]:
@@ -127,12 +146,12 @@ def extract_content_from_response(response) -> Optional[str]:
     if isinstance(response, str):
         is_sse, sse_result = parse_sse_string(response)
         if is_sse:
-            return sse_result
+            return _guard_llm_content(sse_result)
         if sse_result is not None:
             # SSE 格式正确但包含错误 / 无内容
             return None
-        # 非 SSE 字符串，直接返回
-        return response.strip()
+        # 非 SSE 字符串：可能是代理返回的 HTML 兜底页，需过滤后再返回
+        return _guard_llm_content(response.strip())
 
     # 4. 尝试从响应的字符串表示中解析 SSE 流式数据
     # 某些代理在非流式请求下返回 SSE，SDK 无法解析成标准对象，
@@ -140,7 +159,7 @@ def extract_content_from_response(response) -> Optional[str]:
     for text in _response_to_strings(response):
         is_sse, sse_result = parse_sse_string(text)
         if is_sse:
-            return sse_result
+            return _guard_llm_content(sse_result)
 
     return None
 

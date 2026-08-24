@@ -2,7 +2,7 @@ import json
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 
@@ -15,6 +15,11 @@ MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
 _log_lock = threading.Lock()
 _pending_requests: Dict[int, Dict[str, Any]] = {}  # 暂存请求信息，等待响应后合并
+# 同步 HTTPX 客户端的事件钩子与 SDK 调用运行在同一线程，用线程本地记录
+# 本线程请求的 key。并发翻译时若按"第一个已完成"全局挑选，会把 A 线程的
+# 响应配到 B 线程的请求上，导致日志出现"答非所问"的假象。
+_request_ctx = threading.local()
+_PENDING_TTL_SECONDS = 1800  # 异常失败的请求可能永远等不到日志写入，超时后清理
 
 
 # ==================== 日志写入 ====================
@@ -107,11 +112,23 @@ def _on_request(request: httpx.Request) -> None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         request_body = {"raw": request.content.decode("utf-8", errors="replace")}
 
-    _pending_requests[id(request)] = {
-        "start_time": time.time(),
+    now = time.time()
+    with _log_lock:
+        expired = [
+            key
+            for key, pending in _pending_requests.items()
+            if now - pending["start_time"] > _PENDING_TTL_SECONDS
+        ]
+        for key in expired:
+            del _pending_requests[key]
+
+    key = id(request)
+    _pending_requests[key] = {
+        "start_time": now,
         "url": str(request.url),
         "request": request_body,
     }
+    _request_ctx.key = key
 
 
 def _on_response(response: httpx.Response) -> None:
@@ -139,21 +156,29 @@ def create_logging_http_client() -> httpx.Client:
     )
 
 
+def _pop_fallback_pending() -> Optional[Dict[str, Any]]:
+    """兜底：线程本地 key 失效时（如异常路径），按旧行为取一条待写日志。
+
+    优先取已完成的，否则取最早进入的一条。
+    """
+    with _log_lock:
+        if not _pending_requests:
+            return None
+        for key, pending in _pending_requests.items():
+            if pending.get("completed"):
+                return _pending_requests.pop(key)
+        return _pending_requests.pop(next(iter(_pending_requests)))
+
+
 def log_llm_response(response: Any) -> None:
     """记录完整的请求+响应（在 SDK 解析响应后调用）"""
-    if not _pending_requests:
+    # 正常路径：本线程 _on_request 记录的 key，保证请求与响应一一对应
+    key = getattr(_request_ctx, "key", None)
+    pending = _pending_requests.pop(key, None) if key is not None else None
+    if pending is None:
+        pending = _pop_fallback_pending()
+    if pending is None:
         return
-
-    # 优先选择已完成响应的请求（有 duration_ms）
-    completed_key = None
-    for key, pending in _pending_requests.items():
-        if pending.get("completed"):
-            completed_key = key
-            break
-
-    # 如果没有已完成的，取第一个
-    key = completed_key if completed_key else next(iter(_pending_requests))
-    pending = _pending_requests.pop(key)
 
     # 序列化完整响应体
     response_data = {}

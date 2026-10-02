@@ -7,9 +7,13 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from videocaptioner.config import MODEL_PATH
 from videocaptioner.core.alignment import TextMatchingConfig, TextMatchingTask
-from videocaptioner.core.entities import TranscribeConfig, TranscribeOutputFormatEnum
+from videocaptioner.core.entities import (
+    TranscribeConfig,
+    TranscribeModelEnum,
+    TranscribeOutputFormatEnum,
+)
 from videocaptioner.core.utils.logger import setup_logger
-from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.common.config import cfg, resolve_elevenlabs_asr_api_key
 
 logger = setup_logger("text_matching_thread")
 
@@ -21,8 +25,27 @@ def _ui_language_to_transcribe(code: str) -> str:
     return code
 
 
-def _build_transcribe_config(language: str) -> TranscribeConfig:
+def _cuda_available() -> bool:
+    """Cheap CUDA probe (ffmpeg hwaccel, same gate the subtitle renderer uses).
+
+    faster-whisper-xxl with ``-d cuda`` fails hard on machines without a usable
+    GPU, so the alignment flow falls back to CPU before handing the job off.
+    Reuses the task factory's session-level TTL cache so a probe already run by
+    the transcription flow is not repeated.
+    """
+    try:
+        from videocaptioner.ui.task_factory import _cuda_available_cached
+
+        return _cuda_available_cached()
+    except Exception:
+        logger.warning("CUDA 探测失败，按不可用处理", exc_info=True)
+        return False
+
+
+def _build_transcribe_config(language: str, device: str = "") -> TranscribeConfig:
     """与主流程转录任务一致，使用全局设置中的 ASR 引擎与 FasterWhisper 参数。"""
+    if not device:
+        device = cfg.faster_whisper_device.value
     return TranscribeConfig(
         transcribe_model=cfg.transcribe_model.value,
         transcribe_language=_ui_language_to_transcribe(language),
@@ -33,10 +56,14 @@ def _build_transcribe_config(language: str) -> TranscribeConfig:
         whisper_api_base=cfg.whisper_api_base.value,
         whisper_api_model=cfg.whisper_api_model.value,
         whisper_api_prompt=cfg.whisper_api_prompt.value,
+        # ElevenLabs Scribe：与转录/视频对齐面板共用同一份 Key（留空复用配音 Key）
+        elevenlabs_api_key=resolve_elevenlabs_asr_api_key(),
+        elevenlabs_api_base=cfg.elevenlabs_asr_base_url.value,
+        elevenlabs_model=cfg.elevenlabs_asr_model.value,
         faster_whisper_program=cfg.faster_whisper_program.value,
         faster_whisper_model=cfg.faster_whisper_model.value,
         faster_whisper_model_dir=str(MODEL_PATH),
-        faster_whisper_device=cfg.faster_whisper_device.value,
+        faster_whisper_device=device,
         faster_whisper_vad_filter=True,  # 文稿匹配依赖稳定语音段时间轴，贴近 txt2srt 默认
         faster_whisper_vad_threshold=cfg.faster_whisper_vad_threshold.value,
         faster_whisper_vad_method=cfg.faster_whisper_vad_method.value,
@@ -79,6 +106,22 @@ class TextMatchingThread(QThread):
             model = cfg.transcribe_model.value.value
             logger.info(f"使用 ASR 引擎: {model}, 语言: {self.language}")
 
+            # 无可用 GPU 时自动降级 CPU：faster-whisper-xxl 在 cuda 模式下会直接
+            # 失败或空转，CPU 模式至少能完成（速度更慢但有明确提示）。
+            # 云端引擎（ElevenLabs Scribe / Whisper API）不使用本地设备，跳过探测。
+            device = cfg.faster_whisper_device.value
+            if (
+                cfg.transcribe_model.value == TranscribeModelEnum.FASTER_WHISPER
+                and device == "cuda"
+                and not _cuda_available()
+            ):
+                logger.warning("未检测到 CUDA，文稿匹配 ASR 降级为 CPU")
+                self.warning.emit(
+                    "未检测到可用的 CUDA 显卡，已自动切换为 CPU 模式。"
+                    "无独显机器上识别速度会明显变慢，建议在设置中选择更小的 Whisper 模型。"
+                )
+                device = "cpu"
+
             output_path = str(Path(self.media_path).with_suffix(".aligned.srt"))
             task = TextMatchingTask(
                 TextMatchingConfig(
@@ -88,7 +131,7 @@ class TextMatchingThread(QThread):
                     max_chars=self.max_chars,
                     language=self.language,
                     smart_split=self.smart_split,
-                    transcribe_config=_build_transcribe_config(self.language),
+                    transcribe_config=_build_transcribe_config(self.language, device),
                 )
             )
 

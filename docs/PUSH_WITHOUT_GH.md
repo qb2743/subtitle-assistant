@@ -39,9 +39,9 @@ GitHub **不再支持账号密码推送**，需要 **Personal Access Token (PAT)
 
 1. 先打安装包（见 [packaging/README.md](../packaging/README.md)）
 2. 打开：<https://github.com/qb2743/subtitle-assistant/releases/new>
-3. **Tag**：`v1.0.0`
-4. **Title**：`字幕助手 1.0.0`
-5. 上传文件：`packaging\installer\output\SubtitleAssistant-1.0.0-setup.exe`
+3. **Tag**：`v1.4.0`
+4. **Title**：`字幕助手 1.4.0`
+5. 上传文件：`packaging\installer\output\SubtitleAssistant-1.4.0-setup.exe`
 6. **Publish release**
 
 ## 可选：以后想装 gh

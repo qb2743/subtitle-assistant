@@ -1,7 +1,7 @@
 <div align="center">
 
   <h1>字幕助手</h1>
-  <p><strong>版本 1.0</strong></p>
+  <p><strong>版本 1.4.0</strong></p>
   <p>语音识别 · 字幕优化与翻译 · 文稿对齐 · 多引擎配音 · 视频合成</p>
 
 </div>
@@ -42,7 +42,7 @@ videocaptioner-gui
 python -m videocaptioner.ui.main
 ```
 
-窗口标题：**字幕助手 v1.0**。
+窗口标题：**字幕助手 v1.4.0**（版本号取自 `videocaptioner/_version.py`）。
 
 配音页包含视频变速、语音间隔、硬字幕、背景音分离/回嵌、说话人过滤、画面效果和自定义输出目录等视频对齐设置。完整配置说明见
 [docs/DUBBING_ALIGNMENT.md](docs/DUBBING_ALIGNMENT.md)。
@@ -54,6 +54,9 @@ python -m videocaptioner.ui.main
 ```bash
 # 转录
 videocaptioner transcribe video.mp4 --asr bijian
+
+# 云端转录（ElevenLabs Scribe，90+ 语种，支持多 Key 轮询）
+videocaptioner transcribe video.mp4 --asr elevenlabs --elevenlabs-api-key "key1,key2"
 
 # 字幕翻译
 videocaptioner subtitle input.srt --translator bing --target-language en
@@ -67,6 +70,16 @@ videocaptioner process video.mp4 --target-language ja
 # 配置
 videocaptioner config show
 ```
+
+**转录渠道**：必剪（B 接口）、剪映（J 接口）、Whisper API、**ElevenLabs Scribe（云端）**、FasterWhisper、WhisperCpp。
+ElevenLabs Scribe 在「语音转录」「文稿匹配」「视频对齐」三个面板都可选：
+
+```bash
+videocaptioner config set elevenlabs.api_key "key1,key2,key3"   # 多个 Key 轮询
+videocaptioner config set elevenlabs.model scribe_v2
+```
+
+GUI 中「设置 → 转录配置」或转录页的「模型详细设置」里填写；Key 留空时会自动复用「配音 → ElevenLabs」已配置的 Key。
 
 LLM 优化/大模型翻译需配置 API（OpenAI 兼容 Base URL 可只填主机，程序会自动补 `/v1`）：
 

@@ -28,7 +28,7 @@ if (-not (Test-Path (Join-Path $Root ".git"))) {
 git rev-parse HEAD 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     git add -A
-    git commit -m "subtitle-assistant 1.0.0 initial release"
+    git commit -m "subtitle-assistant initial release"
 }
 
 $originUrl = ""

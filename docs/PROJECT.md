@@ -1,7 +1,7 @@
 # 字幕助手 — 项目说明与开发文档
 
 **软件名称**：字幕助手  
-**版本**：1.0.0  
+**版本**：1.4.0  
 **包名**（Python）：`videocaptioner`（沿用上游模块名，便于合并与测试）
 
 ---
@@ -22,7 +22,7 @@
 
 ## 功能概览（1.0）
 
-- **转录**：Faster Whisper、Whisper API、必剪/剪映等  
+- **转录**：Faster Whisper、Whisper API、必剪/剪映、**ElevenLabs Scribe（云端，多 Key 轮询）**
 - **字幕**：断句、LLM 优化与翻译（含配音向提示词）、批量处理  
 - **文稿匹配**：用户文稿 + ASR 时间轴 DTW 对齐  
 - **配音**：Edge / ElevenLabs / OpenAI / 本地 Dots-TTS、VoxCPM（克隆参考音频）  

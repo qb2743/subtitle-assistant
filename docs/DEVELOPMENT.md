@@ -30,5 +30,9 @@ pip install -e ".[gui]"
 
 ## 品牌与版本
 
-- 显示名：**字幕助手 v1.0**（`APP_NAME`、`main_window` 标题）  
-- 版本号：`videocaptioner/_version.py` → `1.0.0`  
+- 显示名：**字幕助手**；窗口标题 `字幕助手 v{VERSION}`（`main_window.py` 从 `config.VERSION` 读取）
+- 版本号**单一来源**：`videocaptioner/_version.py`（hatch-vcs 生成，构建时由
+  `build_pyinstaller.ps1` 通过 `SETUPTOOLS_SCM_PRETEND_VERSION` 传给后端）
+- 打安装包前同步改：`packaging/installer/subtitle_assistant.iss`（`MyAppVersion`）
+  与 `packaging/installer/app_build.iss`、`packaging/字幕助手.iss`
+- 当前版本：**1.4.0**

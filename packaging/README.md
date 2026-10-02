@@ -31,7 +31,7 @@ python -m venv .venv
 
 1. 安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)  
 2. 用 Inno 打开 `packaging\installer\subtitle_assistant.iss`  
-3. 编译 → 得到 `packaging\installer\output\SubtitleAssistant-1.0.0-setup.exe`
+3. 编译 → 得到 `packaging\installer\output\SubtitleAssistant-1.4.0-setup.exe`
 
 修改仓库 URL：编辑 `.iss` 顶部 `#define MyAppURL`。
 

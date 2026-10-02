@@ -1,9 +1,9 @@
-; Inno Setup - Subtitle Assistant 1.0
+; Inno Setup - Subtitle Assistant 1.4
 ; Prerequisite: run packaging/scripts/build_pyinstaller.ps1
 ; Install Inno Setup 6 from https://jrsoftware.org/isinfo.php
 
 #define MyAppName "字幕助手"
-#define MyAppVersion "1.3.3"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "qb2743"
 #define MyAppURL "https://github.com/qb2743/subtitle-assistant"
 #define MyAppExeName "字幕助手.exe"

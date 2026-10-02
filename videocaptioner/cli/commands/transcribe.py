@@ -79,6 +79,7 @@ def run(args: Namespace, config: dict) -> int:
     asr_map = {
         "faster-whisper": TranscribeModelEnum.FASTER_WHISPER,
         "whisper-api": TranscribeModelEnum.WHISPER_API,
+        "elevenlabs": TranscribeModelEnum.ELEVENLABS,
         "bijian": TranscribeModelEnum.BIJIAN,
         "jianying": TranscribeModelEnum.JIANYING,
         "whisper-cpp": TranscribeModelEnum.WHISPER_CPP,
@@ -117,6 +118,13 @@ def run(args: Namespace, config: dict) -> int:
         whisper_api_base=get(config, "whisper_api.api_base", ""),
         whisper_api_model=get(config, "whisper_api.model", "whisper-1"),
         whisper_api_prompt=get(config, "whisper_api.prompt", ""),
+        # ElevenLabs Scribe options (multi-key rotation is supported)
+        elevenlabs_api_key=(
+            getattr(args, "elevenlabs_api_key", None)
+            or get(config, "elevenlabs.api_key", "")
+        ),
+        elevenlabs_api_base=get(config, "elevenlabs.api_base", ""),
+        elevenlabs_model=get(config, "elevenlabs.model", "scribe_v2"),
     )
 
 

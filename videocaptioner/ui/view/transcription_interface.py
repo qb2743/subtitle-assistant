@@ -405,6 +405,7 @@ class TranscriptionInterface(QWidget):
         for model in available_models:
             if (
                 model == TranscribeModelEnum.WHISPER_API
+                or model == TranscribeModelEnum.ELEVENLABS
                 or model == TranscribeModelEnum.BIJIAN
                 or model == TranscribeModelEnum.JIANYING
             ):

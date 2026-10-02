@@ -118,6 +118,20 @@ def validate_whisper_api(config: dict) -> bool:
     return True
 
 
+def validate_elevenlabs(config: dict) -> bool:
+    """Validate ElevenLabs Scribe cloud ASR configuration."""
+    api_key = get(config, "elevenlabs.api_key")
+    if not api_key:
+        output.config_missing_error(
+            "ElevenLabs API key",
+            "elevenlabs.api_key",
+            "VIDEOCAPTIONER_ELEVENLABS_API_KEY",
+            "--elevenlabs-api-key",
+        )
+        return False
+    return True
+
+
 def validate_ffmpeg() -> bool:
     """Check that FFmpeg is available on PATH."""
     if not shutil.which("ffmpeg"):
@@ -163,6 +177,8 @@ def validate_transcribe(config: dict) -> bool:
 
     if asr == "whisper-api":
         return validate_whisper_api(config)
+    if asr == "elevenlabs":
+        return validate_elevenlabs(config)
     if asr == "faster-whisper":
         return validate_faster_whisper()
     if asr == "whisper-cpp":

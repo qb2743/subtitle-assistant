@@ -23,6 +23,10 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from videocaptioner.config import AUTHOR, FEEDBACK_URL, HELP_URL, RELEASE_URL, VERSION, YEAR
+from videocaptioner.core.asr.elevenlabs_asr import (
+    SCRIBE_MODELS,
+    check_elevenlabs_asr_connection,
+)
 from videocaptioner.core.constant import (
     INFOBAR_DURATION_ERROR,
     INFOBAR_DURATION_SUCCESS,
@@ -32,7 +36,7 @@ from videocaptioner.core.entities import LLMServiceEnum, TranscribeModelEnum, Tr
 from videocaptioner.core.llm import check_whisper_connection
 from videocaptioner.core.llm.check_llm import check_llm_connection, get_available_models
 from videocaptioner.core.utils.cache import clear_caches, disable_cache, enable_cache
-from videocaptioner.ui.common.config import cfg
+from videocaptioner.ui.common.config import cfg, resolve_elevenlabs_asr_api_key
 from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.EditComboBoxSettingCard import EditComboBoxSettingCard
 from videocaptioner.ui.components.LineEditSettingCard import LineEditSettingCard
@@ -520,6 +524,53 @@ class SettingInterface(ScrollArea):
         self.whisperApiModelCard.setVisible(False)
         self.checkWhisperConnectionCard.setVisible(False)
 
+        self.__createElevenLabsASRCards()
+
+    def __createElevenLabsASRCards(self):
+        """创建 ElevenLabs Scribe 云端转录配置卡片"""
+        self.elevenlabsApiKeyCard = LineEditSettingCard(
+            cfg.elevenlabs_asr_api_key,
+            FIF.FINGERPRINT,
+            self.tr("ElevenLabs API Key"),
+            self.tr(
+                "多个 Key 用逗号/分号分隔后轮询；留空则复用「配音 → ElevenLabs」的 Key"
+            ),
+            self.tr("xi-... 或 key1,key2,key3"),
+            self.transcribeGroup,
+        )
+
+        self.elevenlabsApiBaseCard = LineEditSettingCard(
+            cfg.elevenlabs_asr_base_url,
+            FIF.LINK,
+            self.tr("ElevenLabs Base URL"),
+            self.tr("留空使用官方端点 https://api.elevenlabs.io"),
+            "https://api.elevenlabs.io",
+            self.transcribeGroup,
+        )
+
+        self.elevenlabsModelCard = EditComboBoxSettingCard(
+            cfg.elevenlabs_asr_model,
+            FIF.ROBOT,  # type: ignore
+            self.tr("Scribe 模型"),
+            self.tr("scribe_v2 支持 90+ 语种与词级时间戳"),
+            list(SCRIBE_MODELS),
+            self.transcribeGroup,
+        )
+
+        self.checkElevenLabsConnectionCard = PushSettingCard(
+            self.tr("测试 ElevenLabs 连接"),
+            FIF.CONNECT,
+            self.tr("测试 ElevenLabs Scribe 转录"),
+            self.tr("用内置示例音频真实调用一次 Scribe（会消耗少量额度）"),
+            self.transcribeGroup,
+        )
+
+        # 默认隐藏 ElevenLabs 配置卡片（仅在选择 ElevenLabs Scribe 时显示）
+        self.elevenlabsApiBaseCard.setVisible(False)
+        self.elevenlabsApiKeyCard.setVisible(False)
+        self.elevenlabsModelCard.setVisible(False)
+        self.checkElevenLabsConnectionCard.setVisible(False)
+
     def __createTranslateServiceCards(self):
         """创建翻译服务相关的配置卡片"""
         # 翻译服务选择卡片
@@ -635,6 +686,11 @@ class SettingInterface(ScrollArea):
         self.transcribeGroup.addSettingCard(self.whisperApiKeyCard)
         self.transcribeGroup.addSettingCard(self.whisperApiModelCard)
         self.transcribeGroup.addSettingCard(self.checkWhisperConnectionCard)
+        # 添加 ElevenLabs Scribe 云端转录配置卡片
+        self.transcribeGroup.addSettingCard(self.elevenlabsApiKeyCard)
+        self.transcribeGroup.addSettingCard(self.elevenlabsApiBaseCard)
+        self.transcribeGroup.addSettingCard(self.elevenlabsModelCard)
+        self.transcribeGroup.addSettingCard(self.checkElevenLabsConnectionCard)
 
         # 添加LLM配置卡片
         self.llmGroup.addSettingCard(self.llmServiceCard)
@@ -681,6 +737,11 @@ class SettingInterface(ScrollArea):
 
         # 检查 Whisper 连接
         self.checkWhisperConnectionCard.clicked.connect(self.checkWhisperConnection)
+
+        # 检查 ElevenLabs Scribe 连接
+        self.checkElevenLabsConnectionCard.clicked.connect(
+            self.checkElevenLabsConnection
+        )
 
         # 保存路径
         self.savePathCard.clicked.connect(self.__onsavePathCardClicked)
@@ -959,6 +1020,17 @@ class SettingInterface(ScrollArea):
         for card in whisper_api_cards:
             card.setVisible(is_whisper_api)
 
+        # ElevenLabs Scribe 配置卡片
+        elevenlabs_cards = [
+            self.elevenlabsApiKeyCard,
+            self.elevenlabsApiBaseCard,
+            self.elevenlabsModelCard,
+            self.checkElevenLabsConnectionCard,
+        ]
+        is_elevenlabs = model_name == TranscribeModelEnum.ELEVENLABS.value
+        for card in elevenlabs_cards:
+            card.setVisible(is_elevenlabs)
+
         # 更新布局
         self.transcribeGroup.adjustSize()
         self.expandLayout.update()
@@ -1051,6 +1123,99 @@ class SettingInterface(ScrollArea):
             duration=INFOBAR_DURATION_ERROR,
             parent=self,
         )
+
+
+    def checkElevenLabsConnection(self):
+        """检查 ElevenLabs Scribe 转录连接"""
+        scroll_position = self.verticalScrollBar().value()
+
+        api_key = resolve_elevenlabs_asr_api_key()
+        base_url = self.elevenlabsApiBaseCard.lineEdit.text().strip()
+        model = self.elevenlabsModelCard.comboBox.currentText().strip()
+
+        if not api_key:
+            InfoBar.warning(
+                self.tr("配置不完整"),
+                self.tr(
+                    "请填写 ElevenLabs API Key（或在「配音 → ElevenLabs」里配置后留空此项）"
+                ),
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
+            )
+            return
+
+        self.checkElevenLabsConnectionCard.button.setEnabled(False)
+        self.checkElevenLabsConnectionCard.button.setText(self.tr("正在测试..."))
+        self.verticalScrollBar().setValue(scroll_position)
+
+        self.elevenlabs_connection_thread = ElevenLabsASRConnectionThread(
+            api_key, base_url, model
+        )
+        self.elevenlabs_connection_thread.finished.connect(
+            self.onElevenLabsConnectionCheckFinished
+        )
+        self.elevenlabs_connection_thread.error.connect(
+            self.onElevenLabsConnectionCheckError
+        )
+        self.elevenlabs_connection_thread.start()
+
+    def onElevenLabsConnectionCheckFinished(self, success, result):
+        """处理 ElevenLabs 连接检查完成事件"""
+        self.checkElevenLabsConnectionCard.button.setEnabled(True)
+        self.checkElevenLabsConnectionCard.button.setText(
+            self.tr("测试 ElevenLabs 连接")
+        )
+
+        if success:
+            InfoBar.success(
+                self.tr("连接成功"),
+                self.tr("ElevenLabs Scribe 转录成功！\n转录结果：") + result,
+                duration=INFOBAR_DURATION_SUCCESS,
+                parent=self,
+            )
+        else:
+            InfoBar.error(
+                self.tr("连接失败"),
+                self.tr("ElevenLabs Scribe 转录失败！\n") + result,
+                duration=INFOBAR_DURATION_ERROR,
+                parent=self,
+            )
+
+    def onElevenLabsConnectionCheckError(self, message):
+        """处理 ElevenLabs 连接检查错误事件"""
+        self.checkElevenLabsConnectionCard.button.setEnabled(True)
+        self.checkElevenLabsConnectionCard.button.setText(
+            self.tr("测试 ElevenLabs 连接")
+        )
+        InfoBar.error(
+            self.tr("测试错误"),
+            message,
+            duration=INFOBAR_DURATION_ERROR,
+            parent=self,
+        )
+
+
+class ElevenLabsASRConnectionThread(QThread):
+    """ElevenLabs Scribe 连接测试线程"""
+
+    finished = pyqtSignal(bool, str)
+    error = pyqtSignal(str)
+
+    def __init__(self, api_key, base_url, model):
+        super().__init__()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+
+    def run(self):
+        """执行连接测试"""
+        try:
+            success, result = check_elevenlabs_asr_connection(
+                self.api_key, self.base_url, self.model
+            )
+            self.finished.emit(success, result)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class WhisperConnectionThread(QThread):

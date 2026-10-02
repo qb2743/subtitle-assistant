@@ -120,6 +120,7 @@ class TranscribeModelEnum(Enum):
     BIJIAN = "B 接口"
     JIANYING = "J 接口"
     WHISPER_API = "Whisper [API] ✨"
+    ELEVENLABS = "ElevenLabs Scribe ✨"
     FASTER_WHISPER = "FasterWhisper ✨"
     WHISPER_CPP = "WhisperCpp"
 
@@ -506,6 +507,10 @@ ASR_LANGUAGE_CAPABILITIES: dict[TranscribeModelEnum, ASRLanguageCapability] = {
         supported_languages=_get_all_languages_except_auto(),
         supports_auto=True,
     ),
+    TranscribeModelEnum.ELEVENLABS: ASRLanguageCapability(
+        supported_languages=_get_all_languages_except_auto(),
+        supports_auto=True,
+    ),
 }
 
 
@@ -563,6 +568,10 @@ class TranscribeConfig:
     whisper_api_base: Optional[str] = None
     whisper_api_model: Optional[str] = None
     whisper_api_prompt: Optional[str] = None
+    # ElevenLabs Scribe 配置（云端转录；支持多 API Key 轮询）
+    elevenlabs_api_key: Optional[str] = None
+    elevenlabs_api_base: Optional[str] = None
+    elevenlabs_model: Optional[str] = None
     # Faster Whisper 配置
     faster_whisper_program: Optional[str] = None
     faster_whisper_model: Optional[FasterWhisperModelEnum] = None
@@ -599,6 +608,11 @@ class TranscribeConfig:
             lines.append(f"API Model: {self.whisper_api_model}")
             if self.whisper_api_prompt:
                 lines.append(f"Prompt: {self.whisper_api_prompt[:30]}...")
+
+        elif self.transcribe_model == TranscribeModelEnum.ELEVENLABS:
+            lines.append(f"API Base: {self.elevenlabs_api_base or '（默认官方端点）'}")
+            lines.append(f"API Key: {self._mask_key(self.elevenlabs_api_key)}")
+            lines.append(f"API Model: {self.elevenlabs_model}")
 
         elif self.transcribe_model == TranscribeModelEnum.FASTER_WHISPER:
             lines.append(

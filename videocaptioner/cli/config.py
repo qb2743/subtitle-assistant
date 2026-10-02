@@ -42,6 +42,11 @@ ENV_MAP: Dict[str, str] = {
     "VIDEOCAPTIONER_LLM_MODEL": "llm.model",
     "VIDEOCAPTIONER_WHISPER_API_KEY": "whisper_api.api_key",
     "VIDEOCAPTIONER_WHISPER_API_BASE": "whisper_api.api_base",
+    # ElevenLabs Scribe (cloud transcription)
+    "ELEVENLABS_API_KEY": "elevenlabs.api_key",
+    "VIDEOCAPTIONER_ELEVENLABS_API_KEY": "elevenlabs.api_key",
+    "VIDEOCAPTIONER_ELEVENLABS_API_BASE": "elevenlabs.api_base",
+    "VIDEOCAPTIONER_ELEVENLABS_MODEL": "elevenlabs.model",
     "VIDEOCAPTIONER_DEEPLX_ENDPOINT": "translate.deeplx_endpoint",
     "VIDEOCAPTIONER_TARGET_LANG": "translate.target_language",
     "VIDEOCAPTIONER_DUBBING_PROVIDER": "dubbing.provider",
@@ -72,6 +77,11 @@ DEFAULTS: Dict[str, Any] = {
         "api_base": "https://api.openai.com/v1",
         "model": "whisper-1",
         "prompt": "",
+    },
+    "elevenlabs": {
+        "api_key": "",
+        "api_base": "",
+        "model": "scribe_v2",
     },
     "transcribe": {
         "asr": "bijian",

@@ -57,7 +57,7 @@
 git init
 git add .
 git status   # 确认无 AppData、.venv、大体积 bin
-git commit -m "字幕助手 1.0.0 初始发布"
+git commit -m "字幕助手 1.4.0 发布"
 git branch -M main
 git remote add origin https://github.com/qb2743/subtitle-assistant.git
 git push -u origin main
@@ -69,8 +69,8 @@ git push -u origin main
 
 1. `.\packaging\scripts\build_pyinstaller.ps1`
 2. 用 Inno Setup 编译 `packaging\installer\subtitle_assistant.iss`
-3. 得到 `packaging\installer\output\SubtitleAssistant-1.0.0-setup.exe`
-4. 在 GitHub → **Releases** → New release → 标签 `v1.0.0` → 上传该 exe
+3. 得到 `packaging\installer\output\SubtitleAssistant-1.4.0-setup.exe`
+4. 在 GitHub → **Releases** → New release → 标签 `v1.4.0` → 上传该 exe
 
 ## 用户安装后缺什么？
 

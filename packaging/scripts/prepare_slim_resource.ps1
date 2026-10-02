@@ -17,7 +17,10 @@ foreach ($sub in @("assets", "subtitle_style", "translations", "fonts")) {
     Write-Host "Copied $sub"
 }
 
-Get-ChildItem (Join-Path $Slim "assets") -Filter "donate_*.jpg" -ErrorAction SilentlyContinue | Remove-Item -Force
+# Remove donation banners (robust across PS 5.1/7: direct Get-ChildItem →
+# Remove-Item pipeline binding fails on some PS 5.1 setups, so hop through
+# ForEach-Object and delete by FullName).
+Get-ChildItem -LiteralPath (Join-Path $Slim "assets") -Filter "donate_*.jpg" -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 # logo.ico for PyInstaller / Inno
 $py = Join-Path $Root ".venv/Scripts/python.exe"

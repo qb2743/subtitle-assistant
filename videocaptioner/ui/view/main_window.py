@@ -15,7 +15,7 @@ from qfluentwidgets import (
     SplashScreen,
 )
 
-from videocaptioner.config import ASSETS_PATH
+from videocaptioner.config import ASSETS_PATH, VERSION
 from videocaptioner.core.constant import INFOBAR_DURATION_FOREVER
 from videocaptioner.ui.common.config import cfg
 from videocaptioner.ui.view.batch_process_interface import BatchProcessInterface
@@ -76,7 +76,8 @@ class MainWindow(FluentWindow):
         if interface.windowTitle():
             self.setWindowTitle(interface.windowTitle())
         else:
-            self.setWindowTitle(self.tr("字幕助手"))
+            # 页面没有自己的标题时回落到应用名 + 版本（版本单一来源：config.VERSION）
+            self.setWindowTitle(self.tr(f"字幕助手 v{VERSION}"))
         self.stackedWidget.setCurrentWidget(interface, popOut=False)
 
     def initWindow(self):
@@ -84,7 +85,8 @@ class MainWindow(FluentWindow):
         self.resize(1200, 800)
         self.setMinimumWidth(700)
         self.setWindowIcon(QIcon(str(LOGO_PATH)))
-        self.setWindowTitle(self.tr("字幕助手 v1.0"))
+        # 版本号单一来源：videocaptioner/_version.py → config.VERSION
+        self.setWindowTitle(self.tr(f"字幕助手 v{VERSION}"))
 
         self.setMicaEffectEnabled(cfg.get(cfg.micaEnabled))
 

@@ -1,6 +1,8 @@
 from videocaptioner.core.asr.asr_data import ASRData
 from videocaptioner.core.asr.bcut import BcutASR
 from videocaptioner.core.asr.chunked_asr import ChunkedASR
+from videocaptioner.core.asr.elevenlabs_asr import DEFAULT_MODEL as ELEVENLABS_DEFAULT_MODEL
+from videocaptioner.core.asr.elevenlabs_asr import ElevenLabsASR
 from videocaptioner.core.asr.faster_whisper import FasterWhisperASR
 from videocaptioner.core.asr.jianying import JianYingASR
 from videocaptioner.core.asr.whisper_api import WhisperAPI
@@ -66,6 +68,9 @@ def _create_asr_instance(audio_path: str, config: TranscribeConfig) -> ChunkedAS
     elif model_type == TranscribeModelEnum.WHISPER_API:
         return _create_whisper_api_asr(audio_path, config)
 
+    elif model_type == TranscribeModelEnum.ELEVENLABS:
+        return _create_elevenlabs_asr(audio_path, config)
+
     elif model_type == TranscribeModelEnum.FASTER_WHISPER:
         return _create_faster_whisper_asr(audio_path, config)
 
@@ -123,6 +128,25 @@ def _create_whisper_api_asr(audio_path: str, config: TranscribeConfig) -> Chunke
     }
     return ChunkedASR(
         asr_class=WhisperAPI, audio_path=audio_path, asr_kwargs=asr_kwargs
+    )
+
+
+def _create_elevenlabs_asr(audio_path: str, config: TranscribeConfig) -> ChunkedASR:
+    """Create ElevenLabs Scribe (云端转录) instance with chunking support.
+
+    分块策略与 Whisper API 一致（10 分钟/块、重叠 10 秒、3 并发）：既把单次上传
+    控制在合理体积，也让多个分块并行落在轮询到的不同 API Key 上。
+    """
+    asr_kwargs = {
+        "use_cache": True,
+        "need_word_time_stamp": config.need_word_time_stamp,
+        "language": config.transcribe_language,
+        "api_key": config.elevenlabs_api_key or "",
+        "base_url": config.elevenlabs_api_base or "",
+        "model": config.elevenlabs_model or ELEVENLABS_DEFAULT_MODEL,
+    }
+    return ChunkedASR(
+        asr_class=ElevenLabsASR, audio_path=audio_path, asr_kwargs=asr_kwargs
     )
 
 

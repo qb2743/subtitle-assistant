@@ -13,15 +13,42 @@ from videocaptioner.core.entities import (
     SynthesisConfig,
     SynthesisTask,
     TranscribeConfig,
+    TranscribeModelEnum,
     TranscribeTask,
     TranscriptAndSubtitleTask,
 )
 from videocaptioner.core.llm.client import resolve_llm_base_url
-from videocaptioner.ui.common.config import Config, cfg
+from videocaptioner.core.utils.logger import setup_logger
+from videocaptioner.ui.common.config import (
+    Config,
+    cfg,
+    resolve_elevenlabs_asr_api_key,
+)
 from videocaptioner.ui.dubbing_config_builder import create_dubbing_config_from_cfg
 from videocaptioner.ui.dubbing_config_builder import (
     resolve_dubbing_voice as resolve_dubbing_voice,
 )
+
+logger = setup_logger("task_factory")
+
+# CUDA 探测结果会话级缓存（5 分钟 TTL）：create_transcribe_task 可能被 UI 线程
+# 与批量线程高频调用，每次跑 ffmpeg -hwaccels 会有 ~0.3s 开销。
+_cuda_probe_cache: dict = {"result": None, "ts": 0.0}
+_CUDA_PROBE_TTL = 300.0
+
+
+def _cuda_available_cached() -> bool:
+    """带 TTL 的 CUDA 探测，避免每次建任务都跑 ffmpeg 子进程。"""
+    import time
+
+    now = time.monotonic()
+    if _cuda_probe_cache["result"] is not None and now - _cuda_probe_cache["ts"] < _CUDA_PROBE_TTL:
+        return _cuda_probe_cache["result"]
+    from videocaptioner.core.utils.video_utils import check_cuda_available
+
+    result = check_cuda_available()
+    _cuda_probe_cache.update(result=result, ts=now)
+    return result
 
 
 class TaskFactory:
@@ -78,6 +105,22 @@ class TaskFactory:
         file_name = Path(file_path).stem
         cfg_src = cfg_source or cfg
 
+        # 无可用 GPU 时自动降级 CPU：faster-whisper-xxl 在 cuda 模式下会直接
+        # 失败或空转，CPU 模式至少能完成（速度更慢但有日志提示）。此修复覆盖
+        # 主转录流程与「视频对齐」页面的 ASR 环节；只影响本次任务，不改全局配置。
+        # 仅本地 FasterWhisper 需要这段探测：云端渠道（Whisper API / ElevenLabs
+        # Scribe）与设备无关，跑 ffmpeg 探测只会白等并打出误导性警告。
+        faster_whisper_device = cfg_src.faster_whisper_device.value
+        if (
+            cfg_src.transcribe_model.value == TranscribeModelEnum.FASTER_WHISPER
+            and faster_whisper_device == "cuda"
+            and not _cuda_available_cached()
+        ):
+            logger.warning(
+                "未检测到可用 CUDA，本次转录 ASR 降级为 CPU（faster_whisper_device 全局配置不变）"
+            )
+            faster_whisper_device = "cpu"
+
         # 构建输出路径
         if need_next_task:
             if need_word_time_stamp is None:
@@ -104,11 +147,15 @@ class TaskFactory:
             whisper_api_base=cfg_src.whisper_api_base.value,
             whisper_api_model=cfg_src.whisper_api_model.value,
             whisper_api_prompt=cfg_src.whisper_api_prompt.value,
+            # ElevenLabs Scribe 配置（Key 留空时复用配音面板的 ElevenLabs Key）
+            elevenlabs_api_key=resolve_elevenlabs_asr_api_key(cfg_src),
+            elevenlabs_api_base=cfg_src.elevenlabs_asr_base_url.value,
+            elevenlabs_model=cfg_src.elevenlabs_asr_model.value,
             # Faster Whisper 配置
             faster_whisper_program=cfg_src.faster_whisper_program.value,
             faster_whisper_model=cfg_src.faster_whisper_model.value,
             faster_whisper_model_dir=str(MODEL_PATH),
-            faster_whisper_device=cfg_src.faster_whisper_device.value,
+            faster_whisper_device=faster_whisper_device,
             faster_whisper_vad_filter=cfg_src.faster_whisper_vad_filter.value,
             faster_whisper_vad_threshold=cfg_src.faster_whisper_vad_threshold.value,
             faster_whisper_vad_method=cfg_src.faster_whisper_vad_method.value,

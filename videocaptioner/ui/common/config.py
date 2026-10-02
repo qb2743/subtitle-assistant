@@ -236,6 +236,15 @@ class Config(QConfig):
     whisper_api_model = OptionsConfigItem("WhisperAPI", "WhisperApiModel", "")
     whisper_api_prompt = ConfigItem("WhisperAPI", "WhisperApiPrompt", "")
 
+    # ------------------- ElevenLabs Scribe 云端转录配置 -------------------
+    # API Key 支持多个（逗号/分号/空白分隔），与配音面板的 ElevenLabs Key 一样
+    # 走轮询；留空时转录会复用「配音 → ElevenLabs」里已配置的 Key。
+    elevenlabs_asr_api_key = ConfigItem("ElevenLabsASR", "ApiKey", "")
+    elevenlabs_asr_base_url = ConfigItem("ElevenLabsASR", "BaseUrl", "")
+    elevenlabs_asr_model = OptionsConfigItem(
+        "ElevenLabsASR", "Model", "scribe_v2"
+    )
+
     # ------------------- 字幕配置 -------------------
     need_optimize = ConfigItem("Subtitle", "NeedOptimize", False, BoolValidator())
     need_translate = ConfigItem("Subtitle", "NeedTranslate", False, BoolValidator())
@@ -474,3 +483,16 @@ cfg = Config()
 cfg.themeMode.value = Theme.DARK
 cfg.themeColor.value = QColor("#ff28f08b")
 qconfig.load(SETTINGS_PATH, cfg)
+
+
+def resolve_elevenlabs_asr_api_key(cfg_source=None) -> str:
+    """返回 ElevenLabs 云端转录要用的 API Key 串（可含多个 Key）。
+
+    优先用转录页专设的 Key；留空时复用「配音 → ElevenLabs」的 Key，这样已经
+    配好配音 Key 的用户无需重复填写即可直接使用 Scribe 转录。
+    """
+    source = cfg_source or cfg
+    keys = (source.elevenlabs_asr_api_key.value or "").strip()
+    if keys:
+        return keys
+    return (source.dubbing_api_key_elevenlabs.value or "").strip()

@@ -15,6 +15,7 @@ from videocaptioner.core.entities import (
 )
 from videocaptioner.core.utils.platform_utils import is_macos
 
+from .ElevenLabsASRSettingWidget import ElevenLabsASRSettingWidget
 from .FasterWhisperSettingWidget import FasterWhisperSettingWidget
 from .transcription_settings_style import (
     TRANSCRIPTION_EMBED_PANEL_QSS,
@@ -43,6 +44,7 @@ class TranscriptionSettingCard(QWidget):
         self.empty_widget.setStyleSheet(_TRANSPARENT_PANEL)
         self.whisper_cpp_widget = WhisperCppSettingWidget(self)
         self.whisper_api_widget = WhisperAPISettingWidget(self)
+        self.elevenlabs_widget = ElevenLabsASRSettingWidget(self)
 
         self.faster_whisper_widget: Optional[FasterWhisperSettingWidget] = None
         if not is_macos():
@@ -51,6 +53,7 @@ class TranscriptionSettingCard(QWidget):
         self.stacked_widget.addWidget(self.empty_widget)
         self.stacked_widget.addWidget(self.whisper_cpp_widget)
         self.stacked_widget.addWidget(self.whisper_api_widget)
+        self.stacked_widget.addWidget(self.elevenlabs_widget)
         if self.faster_whisper_widget is not None:
             self.stacked_widget.addWidget(self.faster_whisper_widget)
 
@@ -61,6 +64,8 @@ class TranscriptionSettingCard(QWidget):
             self.stacked_widget.setCurrentWidget(self.whisper_cpp_widget)
         elif value == TranscribeModelEnum.WHISPER_API.value:
             self.stacked_widget.setCurrentWidget(self.whisper_api_widget)
+        elif value == TranscribeModelEnum.ELEVENLABS.value:
+            self.stacked_widget.setCurrentWidget(self.elevenlabs_widget)
         elif value == TranscribeModelEnum.FASTER_WHISPER.value:
             if self.faster_whisper_widget is not None:
                 self.stacked_widget.setCurrentWidget(self.faster_whisper_widget)

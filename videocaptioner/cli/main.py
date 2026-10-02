@@ -112,10 +112,11 @@ def _build_transcribe_parser(subparsers) -> None:
     asr = p.add_argument_group("ASR options")
     asr.add_argument(
         "--asr",
-        choices=["bijian", "jianying", "whisper-api", "whisper-cpp"],
+        choices=["bijian", "jianying", "whisper-api", "elevenlabs", "whisper-cpp"],
         help="ASR engine (default: bijian). "
              "bijian/jianying: free, no setup, Chinese & English only. "
-             "For other languages use whisper-api or whisper-cpp",
+             "elevenlabs: cloud Scribe (90+ languages, multi-key rotation). "
+             "For other languages use whisper-api / elevenlabs or whisper-cpp",
     )
     asr.add_argument("--language", metavar="CODE",
                      help="Source language as ISO 639-1 code, or 'auto' (default: auto)")
@@ -125,6 +126,9 @@ def _build_transcribe_parser(subparsers) -> None:
                      help="Whisper API key (for --asr whisper-api)")
     asr.add_argument("--whisper-api-base", metavar="URL",
                      help="Whisper API base URL")
+    asr.add_argument("--elevenlabs-api-key", metavar="KEY",
+                     help="ElevenLabs API key for --asr elevenlabs; "
+                          "separate multiple keys with commas to rotate")
 
     asr.add_argument("--whisper-model", metavar="NAME",
                      help="Model name for whisper-api (default: whisper-1) "
@@ -384,11 +388,13 @@ def _build_process_parser(subparsers) -> None:
     pipe.add_argument("--dub", action="store_true", help="Generate dubbed audio/video after subtitle processing")
     pipe.add_argument("--dub-only", action="store_true", help="Output only the dubbed result, skipping subtitle burn/embedding")
 
-    pipe.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "whisper-cpp"],
+    pipe.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "elevenlabs", "whisper-cpp"],
                       help="ASR engine (default: bijian)")
     pipe.add_argument("--language", metavar="CODE",
                       help="Source language as ISO 639-1 code, or 'auto' (default: auto)")
     pipe.add_argument("--whisper-api-key", metavar="KEY", help="Whisper API key (for --asr whisper-api)")
+    pipe.add_argument("--elevenlabs-api-key", metavar="KEY",
+                      help="ElevenLabs API key for --asr elevenlabs (comma-separated keys rotate)")
     pipe.add_argument("--translator", choices=["llm", "bing", "google"],
                       help="Translation service (default: bing). bing and google are free")
     pipe.add_argument("--to", dest="target_language", metavar="CODE", help="Target language BCP 47 code")
@@ -486,7 +492,7 @@ def _build_config_parser(subparsers) -> None:
     init_p.add_argument("--llm-api-key", metavar="KEY", help="LLM API key")
     init_p.add_argument("--llm-api-base", metavar="URL", help="LLM API base URL")
     init_p.add_argument("--llm-model", metavar="NAME", help="LLM model")
-    init_p.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "whisper-cpp"], help="Default ASR engine")
+    init_p.add_argument("--asr", choices=["bijian", "jianying", "whisper-api", "elevenlabs", "whisper-cpp"], help="Default ASR engine")
     init_p.add_argument("--translator", choices=["llm", "bing", "google"], help="Default translation service")
     init_p.add_argument("--target-language", "--to", dest="target_language", metavar="CODE", help=argparse.SUPPRESS)
     init_p.add_argument("--no-optimize", action="store_true", help="Disable AI subtitle polish by default")
@@ -576,6 +582,9 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict:
     _set("whisper_api.api_key", getattr(args, "whisper_api_key", None))
     _set("whisper_api.api_base", getattr(args, "whisper_api_base", None))
     _set("whisper_api.model", getattr(args, "whisper_model", None))
+
+    # ElevenLabs Scribe (cloud ASR)
+    _set("elevenlabs.api_key", getattr(args, "elevenlabs_api_key", None))
 
     # Transcribe
     _set("transcribe.asr", getattr(args, "asr", None))
